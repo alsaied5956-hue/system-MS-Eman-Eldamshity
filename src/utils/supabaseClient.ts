@@ -11,10 +11,48 @@ import centerBackup from "../data/centerBackup.json";
 // Log configuration status on startup
 logDatabaseConfiguration();
 
-const SUPABASE_URL = SUPABASE_CONFIG.url;
-const SUPABASE_ANON_KEY = SUPABASE_CONFIG.anonKey;
+const DEFAULT_SUPABASE_URL = "https://lzdvmzumwuqycwdecaan.supabase.co";
+const DEFAULT_SUPABASE_ANON_KEY = "sb_publishable_B2ATdO71x3VxvOL18ATZtA_bupiDf3l";
 
-export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+// Sanitize URL: handle accidental markdown links like [url](url) or wrapping quotes
+function sanitizeSupabaseUrl(val: string): string {
+  if (!val) return "";
+  const str = val.trim().replace(/^["']|["']$/g, "");
+  const match = str.match(/https?:\/\/[^\s)\]]+/);
+  if (match && (str.startsWith("[") || str.includes("]("))) {
+    return match[0];
+  }
+  return str;
+}
+
+const rawSupabaseUrl =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_SUPABASE_URL) ||
+  (typeof import.meta !== "undefined" && (import.meta as any)?.env?.NEXT_PUBLIC_SUPABASE_URL) ||
+  (typeof import.meta !== "undefined" && (import.meta as any)?.env?.VITE_SUPABASE_URL) ||
+  SUPABASE_CONFIG?.url ||
+  DEFAULT_SUPABASE_URL;
+
+const rawSupabaseAnonKey =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY) ||
+  (typeof import.meta !== "undefined" && (import.meta as any)?.env?.NEXT_PUBLIC_SUPABASE_ANON_KEY) ||
+  (typeof import.meta !== "undefined" && (import.meta as any)?.env?.VITE_SUPABASE_ANON_KEY) ||
+  SUPABASE_CONFIG?.anonKey ||
+  DEFAULT_SUPABASE_ANON_KEY;
+
+let supabaseUrl = sanitizeSupabaseUrl(rawSupabaseUrl);
+let supabaseAnonKey = (rawSupabaseAnonKey || "").trim().replace(/^["']|["']$/g, "");
+
+if (!supabaseUrl || !supabaseUrl.startsWith("http")) {
+  console.error("Critical: Invalid Supabase URL provided:", supabaseUrl);
+  supabaseUrl = DEFAULT_SUPABASE_URL;
+}
+
+if (!supabaseAnonKey) {
+  console.error("Critical: Invalid Supabase Anon Key provided. Falling back to default.");
+  supabaseAnonKey = DEFAULT_SUPABASE_ANON_KEY;
+}
+
+export const supabase: SupabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,

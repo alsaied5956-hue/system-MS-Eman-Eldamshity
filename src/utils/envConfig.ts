@@ -6,12 +6,25 @@
 
 import firebaseAppletConfig from "../../firebase-applet-config.json";
 
+function sanitizeEnvValue(val: string): string {
+  if (!val) return "";
+  let cleaned = val.trim();
+  // Strip surrounding quotes
+  cleaned = cleaned.replace(/^["']|["']$/g, "").trim();
+  // If wrapped in markdown link [url](url) or similar markdown format
+  const match = cleaned.match(/https?:\/\/[^\s)\]]+/);
+  if (match && (cleaned.startsWith("[") || cleaned.includes("]("))) {
+    return match[0];
+  }
+  return cleaned;
+}
+
 function resolveEnvValue(keys: string[], fallback: string = ""): string {
   // 1. Check Node.js / Next.js / Serverless process.env
   if (typeof process !== "undefined" && process?.env) {
     for (const key of keys) {
       if (process.env[key] && typeof process.env[key] === "string" && process.env[key]?.trim() !== "") {
-        return process.env[key]!.trim();
+        return sanitizeEnvValue(process.env[key]!);
       }
     }
   }
@@ -21,12 +34,12 @@ function resolveEnvValue(keys: string[], fallback: string = ""): string {
     const metaEnv = (import.meta as any).env;
     for (const key of keys) {
       if (metaEnv[key] && typeof metaEnv[key] === "string" && metaEnv[key]?.trim() !== "") {
-        return metaEnv[key]!.trim();
+        return sanitizeEnvValue(metaEnv[key]!);
       }
     }
   }
 
-  return fallback;
+  return sanitizeEnvValue(fallback);
 }
 
 // -------------------------------------------------------------
