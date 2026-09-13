@@ -24,6 +24,7 @@ export const GRADE_ORDER: GradeName[] = [
 export type GroupDays = "سبت - إثنين - أربعاء" | "أحد - ثلاثاء - خميس";
 
 export interface Student {
+  id?: string;
   barcode: string;
   name: string;
   phone: string;

@@ -79,6 +79,8 @@ export interface SystemData {
   pendingWhatsAppMessages?: PendingWhatsAppMessage[]; // Auxiliary/backward-compatible
   gradeWhatsAppLinks?: Record<string, string>; // Auxiliary
   deletedBarcodes?: string[]; // Track deleted student barcodes to prevent zombie resurrects
+  deletedPaymentKeys?: string[]; // Track deleted payment keys (monthKey_barcode) to prevent zombie resurrects
+  deletedAttendanceKeys?: string[]; // Track deleted attendance keys (dateKey_barcode) to prevent zombie resurrects
   scanLogUpdatedAt?: number; // Exact timestamp when scanLog was modified
   updatedAt?: number; // Epoch timestamp in ms for conflict resolution
 }
@@ -154,11 +156,11 @@ const seedBackupUsers = Array.isArray(hydratedSeedBackup?.usersList) && hydrated
 const seedBackupPayments = normalizeAndMigratePayments(hydratedSeedBackup?.payments);
 
 export const INITIAL_SYSTEM_DATA: SystemData = {
-  students: seedBackupStudents,
-  attendanceHistory: seedBackupHistory,
-  attendanceToday: seedBackupToday,
+  students: [],
+  attendanceHistory: {},
+  attendanceToday: {},
   scanLogTimes: {},
-  payments: seedBackupPayments,
+  payments: {},
   scanLogOrder: [],
   usersList: seedBackupUsers,
   groupPrices: { ...DEFAULT_GRADE_PRICES, ...seedBackupPrices },
@@ -167,6 +169,8 @@ export const INITIAL_SYSTEM_DATA: SystemData = {
   pendingWhatsAppMessages: Array.isArray(centerBackup?.pendingWhatsAppMessages) ? (centerBackup.pendingWhatsAppMessages as any) : [],
   gradeWhatsAppLinks: (centerBackup?.gradeWhatsAppLinks as Record<string, string>) || {},
   deletedBarcodes: [],
+  deletedPaymentKeys: [],
+  deletedAttendanceKeys: [],
   scanLogUpdatedAt: Date.now(),
   updatedAt: Date.now(),
 };
@@ -442,33 +446,40 @@ export function loadLocalData(): SystemData {
 
     const normalizedPrimaryPayments = normalizeAndMigratePayments(parsed.payments);
     const normalizedLegacyPayments = normalizeAndMigratePayments(legacyPayments);
-    const backupPayments = seedBackupPayments;
 
-    // Merge backup payments, legacy payments, and primary payments seamlessly
-    const mergedPayments: Record<string, Record<string, PaymentRecord>> = {
-      ...backupPayments,
-      ...normalizedLegacyPayments,
-      ...normalizedPrimaryPayments,
-    };
-    for (const [mKey, recMap] of Object.entries(backupPayments)) {
-      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
-      Object.assign(mergedPayments[mKey], recMap);
-    }
-    for (const [mKey, recMap] of Object.entries(normalizedLegacyPayments)) {
-      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
-      Object.assign(mergedPayments[mKey], recMap);
-    }
-    for (const [mKey, recMap] of Object.entries(normalizedPrimaryPayments)) {
-      if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
-      Object.assign(mergedPayments[mKey], recMap);
+    const deletedBarcodesList = Array.isArray(parsed.deletedBarcodes) ? parsed.deletedBarcodes : [];
+    const deletedBarcodesSet = new Set(deletedBarcodesList.map((b: string) => String(b).trim()));
+
+    const deletedPaymentKeysList = Array.isArray(parsed.deletedPaymentKeys) ? parsed.deletedPaymentKeys : [];
+    const deletedPaymentKeysSet = new Set(deletedPaymentKeysList.map((k: string) => String(k).trim()));
+
+    const deletedAttendanceKeysList = Array.isArray(parsed.deletedAttendanceKeys) ? parsed.deletedAttendanceKeys : [];
+    const deletedAttendanceKeysSet = new Set(deletedAttendanceKeysList.map((k: string) => String(k).trim()));
+
+    // Merge primary and legacy payments without injecting seed backup mock data
+    const mergedPayments: Record<string, Record<string, PaymentRecord>> = {};
+    const candidatePayments = { ...normalizedLegacyPayments, ...normalizedPrimaryPayments };
+    for (const [mKey, recMap] of Object.entries(candidatePayments)) {
+      if (!recMap) continue;
+      for (const [bCode, rec] of Object.entries(recMap)) {
+        const cleanB = String(bCode).trim();
+        const pmtKey = `${mKey}_${cleanB}`;
+        if (deletedPaymentKeysSet.has(pmtKey) || deletedBarcodesSet.has(cleanB)) continue;
+        if (!mergedPayments[mKey]) mergedPayments[mKey] = {};
+        mergedPayments[mKey][cleanB] = rec;
+      }
     }
 
     const todayKey = getTodayKey();
     let initialScanOrder: string[] = Array.isArray(parsed.scanLogOrder) ? parsed.scanLogOrder : [];
     let initialScanTimes: Record<string, string> = parsed.scanLogTimes || {};
 
-    // Filter out scans that are from previous days so scanner always opens fresh for today
+    // Filter out scans that are from previous days or have been deleted
     initialScanOrder = initialScanOrder.filter((b: string) => {
+      const cleanB = String(b).trim();
+      if (deletedBarcodesSet.has(cleanB) || deletedAttendanceKeysSet.has(`${todayKey}_${cleanB}`)) {
+        return false;
+      }
       const timeIso = initialScanTimes[b];
       if (typeof timeIso === "string" && timeIso.includes("T")) {
         return timeIso.startsWith(todayKey);
@@ -492,18 +503,35 @@ export function loadLocalData(): SystemData {
         }))
       : [];
 
-    const backupStudents = seedBackupStudents;
-    const backupHistory = seedBackupHistory;
-    const backupToday = seedBackupToday;
     const backupPrices = seedBackupPrices;
-
-    const deletedBarcodesList = Array.isArray(parsed.deletedBarcodes) ? parsed.deletedBarcodes : [];
-    const deletedBarcodesSet = new Set(deletedBarcodesList.map((b: string) => String(b).trim()));
 
     const hasLocalStudents = Array.isArray(parsed.students);
     const finalStudents = hasLocalStudents
       ? (parsed.students as Student[]).filter((s) => !deletedBarcodesSet.has(String(s.barcode).trim()))
       : [];
+
+    // Filter attendance history and today to eliminate any deleted attendance records
+    const rawHistory: Record<string, Record<string, string>> = parsed.attendanceHistory || {};
+    const filteredHistory: Record<string, Record<string, string>> = {};
+    for (const [dKey, dayMap] of Object.entries(rawHistory)) {
+      if (!dayMap) continue;
+      for (const [bCode, status] of Object.entries(dayMap)) {
+        const cleanB = String(bCode).trim();
+        const attKey = `${dKey}_${cleanB}`;
+        if (deletedAttendanceKeysSet.has(attKey) || deletedBarcodesSet.has(cleanB)) continue;
+        if (!filteredHistory[dKey]) filteredHistory[dKey] = {};
+        filteredHistory[dKey][cleanB] = status;
+      }
+    }
+
+    const rawToday: Record<string, string> = parsed.attendanceHistory?.[todayKey] || parsed.attendanceToday || {};
+    const filteredToday: Record<string, string> = {};
+    for (const [bCode, status] of Object.entries(rawToday)) {
+      const cleanB = String(bCode).trim();
+      const attKey = `${todayKey}_${cleanB}`;
+      if (deletedAttendanceKeysSet.has(attKey) || deletedBarcodesSet.has(cleanB)) continue;
+      filteredToday[cleanB] = status;
+    }
 
     // Merge users so that admin, alsaied, eman, mahmoud always exist
     const userMap = new Map<string, UserAccount>();
@@ -518,11 +546,8 @@ export function loadLocalData(): SystemData {
 
     const loaded: SystemData = {
       students: finalStudents,
-      attendanceHistory: {
-        ...backupHistory,
-        ...(parsed.attendanceHistory || {}),
-      },
-      attendanceToday: parsed.attendanceHistory?.[todayKey] || parsed.attendanceToday || backupToday || {},
+      attendanceHistory: filteredHistory,
+      attendanceToday: filteredToday,
       scanLogTimes: filteredScanTimes,
       payments: mergedPayments,
       scanLogOrder: initialScanOrder,
@@ -532,7 +557,9 @@ export function loadLocalData(): SystemData {
       platformMessages: rawPlatformMessages,
       pendingWhatsAppMessages: Array.isArray(parsed.pendingWhatsAppMessages) ? parsed.pendingWhatsAppMessages : [],
       gradeWhatsAppLinks: parsed.gradeWhatsAppLinks || (centerBackup?.gradeWhatsAppLinks as Record<string, string>) || {},
-      deletedBarcodes: Array.isArray(parsed.deletedBarcodes) ? parsed.deletedBarcodes : [],
+      deletedBarcodes: deletedBarcodesList,
+      deletedPaymentKeys: deletedPaymentKeysList,
+      deletedAttendanceKeys: deletedAttendanceKeysList,
       scanLogUpdatedAt: parseTimestamp(parsed.scanLogUpdatedAt) || 0,
       updatedAt: parseTimestamp(parsed.updatedAt) || Date.now(),
     };
@@ -640,26 +667,86 @@ export async function hydrateFromIndexedDB(): Promise<void> {
     const snapUpdated = parseTimestamp(snapshot.updatedAt);
     const currUpdated = parseTimestamp(currentLocal.updatedAt);
 
+    // Merge deletion tombstones from snapshot and current state
+    const mergedDeletedBarcodes = Array.from(
+      new Set([
+        ...(currentLocal.deletedBarcodes || []),
+        ...(snapshot.deletedBarcodes || []),
+      ])
+    );
+    const deletedBarcodesSet = new Set(mergedDeletedBarcodes.map((b) => String(b).trim()));
+
+    const mergedDeletedPaymentKeys = Array.from(
+      new Set([
+        ...(currentLocal.deletedPaymentKeys || []),
+        ...(snapshot.deletedPaymentKeys || []),
+      ])
+    );
+    const deletedPaymentKeysSet = new Set(mergedDeletedPaymentKeys.map((k) => String(k).trim()));
+
+    const mergedDeletedAttendanceKeys = Array.from(
+      new Set([
+        ...(currentLocal.deletedAttendanceKeys || []),
+        ...(snapshot.deletedAttendanceKeys || []),
+      ])
+    );
+    const deletedAttendanceKeysSet = new Set(mergedDeletedAttendanceKeys.map((k) => String(k).trim()));
+
+    // Filter students
+    const candidateStudents =
+      snapshot.students && snapshot.students.length > 0 && snapUpdated >= currUpdated
+        ? snapshot.students
+        : currentLocal.students;
+    const cleanStudents = (candidateStudents || []).filter(
+      (s: Student) => !deletedBarcodesSet.has(String(s.barcode).trim())
+    );
+
+    // Filter attendance history
+    const combinedHistory = {
+      ...(snapshot.attendanceHistory || {}),
+      ...(currentLocal.attendanceHistory || {}),
+    };
+    const cleanHistory: Record<string, Record<string, string>> = {};
+    for (const [dKey, dayMap] of Object.entries(combinedHistory)) {
+      if (!dayMap) continue;
+      for (const [bCode, status] of Object.entries(dayMap)) {
+        const cleanB = String(bCode).trim();
+        if (deletedAttendanceKeysSet.has(`${dKey}_${cleanB}`) || deletedBarcodesSet.has(cleanB)) continue;
+        if (!cleanHistory[dKey]) cleanHistory[dKey] = {};
+        cleanHistory[dKey][cleanB] = status;
+      }
+    }
+
+    // Filter payments
+    const combinedPayments = {
+      ...(snapshot.payments || {}),
+      ...(currentLocal.payments || {}),
+    };
+    const cleanPayments: Record<string, Record<string, PaymentRecord>> = {};
+    for (const [mKey, recMap] of Object.entries(combinedPayments)) {
+      if (!recMap) continue;
+      for (const [bCode, rec] of Object.entries(recMap)) {
+        const cleanB = String(bCode).trim();
+        if (deletedPaymentKeysSet.has(`${mKey}_${cleanB}`) || deletedBarcodesSet.has(cleanB)) continue;
+        if (!cleanPayments[mKey]) cleanPayments[mKey] = {};
+        cleanPayments[mKey][cleanB] = rec;
+      }
+    }
+
     // Merge snapshot with current state to restore any history not kept in lean localStorage
     const merged: SystemData = {
       ...currentLocal,
-      students:
-        snapshot.students && snapshot.students.length > 0 && snapUpdated >= currUpdated
-          ? snapshot.students
-          : currentLocal.students,
-      attendanceHistory: {
-        ...(snapshot.attendanceHistory || {}),
-        ...(currentLocal.attendanceHistory || {}),
-      },
-      payments: {
-        ...(snapshot.payments || {}),
-        ...(currentLocal.payments || {}),
-      },
+      students: cleanStudents,
+      attendanceHistory: cleanHistory,
+      payments: cleanPayments,
       platformMessages:
         Array.isArray(snapshot.platformMessages) &&
         snapshot.platformMessages.length > (currentLocal.platformMessages?.length || 0)
           ? snapshot.platformMessages
           : currentLocal.platformMessages,
+      deletedBarcodes: mergedDeletedBarcodes,
+      deletedPaymentKeys: mergedDeletedPaymentKeys,
+      deletedAttendanceKeys: mergedDeletedAttendanceKeys,
       updatedAt: Math.max(snapUpdated, currUpdated),
     };
 
@@ -1300,7 +1387,7 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   const localScanTime = parseTimestamp(local.scanLogUpdatedAt);
   const cloudScanTime = parseTimestamp(cloud.scanLogUpdatedAt);
 
-  // Union of deleted barcodes to prevent deleted students from resurrecting as zombies
+  // Union of deleted tombstones to prevent deleted records from resurrecting as zombies
   const deletedBarcodes = Array.from(
     new Set([
       ...(Array.isArray(local.deletedBarcodes) ? local.deletedBarcodes : []),
@@ -1308,6 +1395,22 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     ])
   );
   const deletedSet = new Set(deletedBarcodes);
+
+  const deletedPaymentKeys = Array.from(
+    new Set([
+      ...(Array.isArray(local.deletedPaymentKeys) ? local.deletedPaymentKeys : []),
+      ...(Array.isArray(cloud.deletedPaymentKeys) ? cloud.deletedPaymentKeys : []),
+    ])
+  );
+  const deletedPaymentSet = new Set(deletedPaymentKeys);
+
+  const deletedAttendanceKeys = Array.from(
+    new Set([
+      ...(Array.isArray(local.deletedAttendanceKeys) ? local.deletedAttendanceKeys : []),
+      ...(Array.isArray(cloud.deletedAttendanceKeys) ? cloud.deletedAttendanceKeys : []),
+    ])
+  );
+  const deletedAttendanceSet = new Set(deletedAttendanceKeys);
 
   // 1. Merge Students (keyed by barcode and normalized name)
   const studentMap = new Map<string, Student>();
@@ -1430,6 +1533,10 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   ]);
   const mergedToday: Record<string, string> = {};
   allTodayBarcodes.forEach((b) => {
+    const cleanB = String(b).trim();
+    if (deletedSet.has(cleanB) || deletedAttendanceSet.has(`${todayKey}_${cleanB}`)) {
+      return;
+    }
     const loc = local.attendanceToday?.[b];
     const cld = cloud.attendanceToday?.[b];
     // If marked "حضور" or "تأخير" on either local or cloud, prioritize physical entry!
@@ -1441,6 +1548,17 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
       mergedToday[b] = loc || cld || "غائب";
     }
   });
+
+  // Clean mergedHistory of any deleted barcodes or attendance keys
+  for (const [dateKey, dayMap] of Object.entries(mergedHistory)) {
+    if (!dayMap) continue;
+    for (const bCode of Object.keys(dayMap)) {
+      const cleanB = String(bCode).trim();
+      if (deletedSet.has(cleanB) || deletedAttendanceSet.has(`${dateKey}_${cleanB}`)) {
+        delete dayMap[bCode];
+      }
+    }
+  }
 
   mergedHistory[todayKey] = {
     ...(mergedHistory[todayKey] || {}),
@@ -1463,7 +1581,7 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   // Local device scans first (immediate queue on this terminal)
   localOrder.forEach((barcode) => {
     const b = String(barcode || "").trim();
-    if (b && !orderSet.has(b) && !deletedSet.has(b)) {
+    if (b && !orderSet.has(b) && !deletedSet.has(b) && !deletedAttendanceSet.has(`${todayKey}_${b}`)) {
       orderSet.add(b);
       preMergedOrder.push(b);
     }
@@ -1472,7 +1590,7 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   // Remote scans next (scans registered on other assistants' devices or cloud)
   remoteOrder.forEach((barcode) => {
     const b = String(barcode || "").trim();
-    if (b && !orderSet.has(b) && !deletedSet.has(b)) {
+    if (b && !orderSet.has(b) && !deletedSet.has(b) && !deletedAttendanceSet.has(`${todayKey}_${b}`)) {
       orderSet.add(b);
       preMergedOrder.push(b);
     }
@@ -1513,6 +1631,10 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
       if (remoteRecords && typeof remoteRecords === "object") {
         for (const [bCode, remoteRec] of Object.entries(remoteRecords)) {
           if (!remoteRec) continue;
+          const cleanB = String(bCode).trim();
+          if (deletedSet.has(cleanB) || deletedPaymentSet.has(`${mKey}_${cleanB}`)) {
+            continue;
+          }
           const localRec = mergedPayments[mKey][bCode];
           if (!localRec) {
             mergedPayments[mKey][bCode] = { ...remoteRec };
@@ -1535,6 +1657,17 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
             }
           }
         }
+      }
+    }
+  }
+
+  // Clean mergedPayments of any deleted payment keys or deleted student barcodes
+  for (const [mKey, records] of Object.entries(mergedPayments)) {
+    if (!records) continue;
+    for (const bCode of Object.keys(records)) {
+      const cleanB = String(bCode).trim();
+      if (deletedSet.has(cleanB) || deletedPaymentSet.has(`${mKey}_${cleanB}`)) {
+        delete records[bCode];
       }
     }
   }
@@ -1629,6 +1762,8 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     pendingWhatsAppMessages: mergedWhatsApp,
     gradeWhatsAppLinks: mergedGradeWhatsAppLinks,
     deletedBarcodes,
+    deletedPaymentKeys,
+    deletedAttendanceKeys,
     scanLogUpdatedAt: Math.max(localScanTime, cloudScanTime),
     updatedAt: Math.max(localTime, cloudTime),
   };
@@ -2729,9 +2864,47 @@ export function saveScanLogData(
   syncDataToCloud(updated, true);
 }
 
-export function savePaymentsData(payments: Record<string, Record<string, PaymentRecord>>): void {
+export function savePaymentsData(
+  payments: Record<string, Record<string, PaymentRecord>>,
+  deletedPaymentKey?: string
+): void {
   const current = loadLocalData();
-  const updated: SystemData = { ...current, payments, updatedAt: Date.now() };
+  const deletedPaymentKeys = [...(current.deletedPaymentKeys || [])];
+  if (deletedPaymentKey && !deletedPaymentKeys.includes(deletedPaymentKey)) {
+    deletedPaymentKeys.push(deletedPaymentKey);
+  }
+  const updated: SystemData = { ...current, payments, deletedPaymentKeys, updatedAt: Date.now() };
+  syncDataToCloud(updated, true);
+}
+
+export function saveAttendanceDeletedKey(barcode: string, dateKey?: string): void {
+  const current = loadLocalData();
+  const dKey = dateKey || getTodayKey();
+  const attKey = `${dKey}_${String(barcode).trim()}`;
+  const deletedAttendanceKeys = [...(current.deletedAttendanceKeys || [])];
+  if (!deletedAttendanceKeys.includes(attKey)) {
+    deletedAttendanceKeys.push(attKey);
+  }
+
+  const updatedToday = { ...(current.attendanceToday || {}) };
+  delete updatedToday[barcode];
+
+  const updatedHistory = { ...(current.attendanceHistory || {}) };
+  if (updatedHistory[dKey]) {
+    updatedHistory[dKey] = { ...updatedHistory[dKey] };
+    delete updatedHistory[dKey][barcode];
+  }
+
+  const updatedOrder = (current.scanLogOrder || []).filter((b) => b !== barcode);
+
+  const updated: SystemData = {
+    ...current,
+    attendanceToday: updatedToday,
+    attendanceHistory: updatedHistory,
+    scanLogOrder: updatedOrder,
+    deletedAttendanceKeys,
+    updatedAt: Date.now(),
+  };
   syncDataToCloud(updated, true);
 }
 

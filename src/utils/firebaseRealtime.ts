@@ -4,7 +4,7 @@
  * Provides sub-50ms instant state synchronization between devices across different networks
  */
 
-import { getDatabase, ref, set, remove, onValue, Database } from "firebase/database";
+import { getDatabase, ref, set, remove, onValue, onChildRemoved, Database } from "firebase/database";
 import { app } from "./firebase";
 import { FIREBASE_CONFIG } from "./envConfig";
 import { LiveScanPayload, GroupFinishedPayload } from "./supabaseClient";
@@ -148,16 +148,7 @@ export async function broadcastFirebaseDeletion(payload: RealtimeDeletionPayload
     const timestamp = payload.timestamp || Date.now();
     const sourceDeviceId = payload.sourceDeviceId || getPersistentDeviceId();
 
-    // 1. Publish to latest_deletion stream for instant multi-device event notification
-    const deletionRef = ref(db, "live_events/latest_deletion");
-    await set(deletionRef, {
-      ...payload,
-      timestamp,
-      sourceDeviceId,
-      _publishedAt: Date.now(),
-    });
-
-    // 2. Direct removal of the corresponding node in Firebase Realtime Database
+    // 1. Direct removal of the corresponding node in Firebase Realtime Database
     if (payload.type === "student") {
       const studentNode = ref(db, `students_live/${payload.barcode}`);
       await remove(studentNode);
@@ -168,9 +159,68 @@ export async function broadcastFirebaseDeletion(payload: RealtimeDeletionPayload
       const attendanceNode = ref(db, `attendance_live/${payload.dateKey}_${payload.barcode}`);
       await remove(attendanceNode);
     }
+
+    // 2. Publish to latest_deletion stream for instant multi-device event notification
+    const deletionRef = ref(db, "live_events/latest_deletion");
+    await set(deletionRef, {
+      ...payload,
+      timestamp,
+      sourceDeviceId,
+      _publishedAt: Date.now(),
+    });
   } catch (err: any) {
     console.warn("[Firebase RTDB] Failed to broadcast deletion:", err?.message || err);
   }
+}
+
+/**
+ * Sync active student node to Firebase Realtime Database
+ */
+export async function syncStudentNodeToFirebaseRTDB(student: { barcode: string; name?: string }): Promise<void> {
+  const db = getFirebaseRealtimeDb();
+  if (!db || !student.barcode) return;
+  try {
+    const studentNode = ref(db, `students_live/${String(student.barcode).trim()}`);
+    await set(studentNode, {
+      barcode: String(student.barcode).trim(),
+      name: student.name || "",
+      updatedAt: Date.now(),
+    });
+  } catch {}
+}
+
+/**
+ * Sync active payment node to Firebase Realtime Database
+ */
+export async function syncPaymentNodeToFirebaseRTDB(record: { barcode: string; monthKey: string; amount?: number }): Promise<void> {
+  const db = getFirebaseRealtimeDb();
+  if (!db || !record.barcode || !record.monthKey) return;
+  try {
+    const paymentNode = ref(db, `payments_live/${record.monthKey}_${String(record.barcode).trim()}`);
+    await set(paymentNode, {
+      barcode: String(record.barcode).trim(),
+      monthKey: record.monthKey,
+      amount: record.amount || 0,
+      updatedAt: Date.now(),
+    });
+  } catch {}
+}
+
+/**
+ * Sync active attendance node to Firebase Realtime Database
+ */
+export async function syncAttendanceNodeToFirebaseRTDB(record: { barcode: string; dateKey: string; status?: string }): Promise<void> {
+  const db = getFirebaseRealtimeDb();
+  if (!db || !record.barcode || !record.dateKey) return;
+  try {
+    const attendanceNode = ref(db, `attendance_live/${record.dateKey}_${String(record.barcode).trim()}`);
+    await set(attendanceNode, {
+      barcode: String(record.barcode).trim(),
+      dateKey: record.dateKey,
+      status: record.status || "حضور",
+      updatedAt: Date.now(),
+    });
+  } catch {}
 }
 
 // -------------------------------------------------------------
@@ -355,11 +405,14 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
   const db = getFirebaseRealtimeDb();
   if (!db) return () => {};
 
+  const unsubs: Array<() => void> = [];
+
   try {
+    // 1. Active listener on live_events/latest_deletion (onValue)
     const deletionRef = ref(db, "live_events/latest_deletion");
     let isInitialMount = true;
 
-    const unsubscribe = onValue(
+    const unsubLatest = onValue(
       deletionRef,
       (snapshot) => {
         if (!snapshot.exists()) return;
@@ -368,8 +421,8 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
 
         if (isInitialMount) {
           isInitialMount = false;
-          // Ignore events older than 8 seconds on initial mount
-          if (Date.now() - (data._publishedAt || 0) > 8000) {
+          // Ignore events older than 12 seconds on initial mount
+          if (Date.now() - (data._publishedAt || 0) > 12000) {
             return;
           }
         }
@@ -380,13 +433,81 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
         console.warn("[Firebase RTDB] Deletion subscription notice:", error.message);
       }
     );
+    unsubs.push(() => {
+      try {
+        unsubLatest();
+      } catch {}
+    });
+
+    // 2. Active child listener on students_live (onChildRemoved)
+    const studentsLiveRef = ref(db, "students_live");
+    const unsubStudents = onChildRemoved(studentsLiveRef, (snapshot) => {
+      const barcode = snapshot.key;
+      if (barcode) {
+        callback({
+          type: "student",
+          barcode,
+          timestamp: Date.now(),
+        });
+      }
+    });
+    unsubs.push(() => {
+      try {
+        unsubStudents();
+      } catch {}
+    });
+
+    // 3. Active child listener on payments_live (onChildRemoved)
+    const paymentsLiveRef = ref(db, "payments_live");
+    const unsubPayments = onChildRemoved(paymentsLiveRef, (snapshot) => {
+      const key = snapshot.key; // format: ${monthKey}_${barcode}
+      if (key && key.includes("_")) {
+        const [monthKey, ...rest] = key.split("_");
+        const barcode = rest.join("_");
+        callback({
+          type: "payment",
+          barcode,
+          monthKey,
+          timestamp: Date.now(),
+        });
+      }
+    });
+    unsubs.push(() => {
+      try {
+        unsubPayments();
+      } catch {}
+    });
+
+    // 4. Active child listener on attendance_live (onChildRemoved)
+    const attendanceLiveRef = ref(db, "attendance_live");
+    const unsubAttendance = onChildRemoved(attendanceLiveRef, (snapshot) => {
+      const key = snapshot.key; // format: ${dateKey}_${barcode}
+      if (key && key.includes("_")) {
+        const [dateKey, ...rest] = key.split("_");
+        const barcode = rest.join("_");
+        callback({
+          type: "attendance",
+          barcode,
+          dateKey,
+          timestamp: Date.now(),
+        });
+      }
+    });
+    unsubs.push(() => {
+      try {
+        unsubAttendance();
+      } catch {}
+    });
 
     return () => {
-      try {
-        unsubscribe();
-      } catch {}
+      unsubs.forEach((unsub) => {
+        try {
+          unsub();
+        } catch {}
+      });
     };
-  } catch {
+  } catch (err) {
+    console.warn("Failed to subscribe to deletions:", err);
     return () => {};
   }
 }

@@ -51,6 +51,9 @@ import {
   broadcastFirebaseGroupFinished,
   broadcastFirebaseAttendanceStatus,
   broadcastFirebaseDeletion,
+  syncStudentNodeToFirebaseRTDB,
+  syncPaymentNodeToFirebaseRTDB,
+  syncAttendanceNodeToFirebaseRTDB,
 } from "./firebaseRealtime";
 import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./liveEventStream";
 import { recordDeviceEntryExitScan, getPersistentDeviceId } from "./deviceClient";
@@ -629,8 +632,14 @@ export function dualSyncPaymentUpdate(params: {
   });
 }
 
-export function dualSyncPaymentDelete(params: { barcode: string; monthKey: string }) {
+export function dualSyncPaymentDelete(params: { barcode: string; monthKey: string; paymentId?: string | number }) {
   const b = String(params.barcode).trim();
+
+  // 0️⃣ Durable Tombstone to prevent Zombie Resurrection
+  runInBackground(
+    recordTombstone("PAYMENT", `${b}_${params.monthKey}`, "admin", "User deleted payment"),
+    "Record payment tombstone"
+  );
 
   // 1️⃣ Supabase Realtime broadcast
   runInBackground(
@@ -651,7 +660,7 @@ export function dualSyncPaymentDelete(params: { barcode: string; monthKey: strin
   // 2️⃣ Real Database Deletion: Direct Supabase DELETE by primary key id, immediately followed by Firebase RTDB node removal & broadcast
   runInBackground(
     (async () => {
-      await deletePaymentFromSupabase(b, params.monthKey);
+      await deletePaymentFromSupabase(b, params.monthKey, params.paymentId);
 
       // Immediately after successful Supabase deletion, remove node & broadcast in Firebase Realtime Database
       await broadcastFirebaseDeletion({
@@ -791,7 +800,7 @@ export function dualSyncStudentSave(student: Student, action: "add" | "update" =
   });
 }
 
-export function dualSyncStudentDelete(barcode: string) {
+export function dualSyncStudentDelete(barcode: string, studentId?: string | number) {
   const b = String(barcode).trim();
 
   // 0️⃣ Durable Tombstone to prevent Zombie Resurrection
@@ -813,7 +822,7 @@ export function dualSyncStudentDelete(barcode: string) {
   // 2️⃣ Real Database Deletion: Direct Supabase DELETE by primary key id, immediately followed by Firebase RTDB node removal & broadcast
   runInBackground(
     (async () => {
-      await deleteStudentFromSupabase(b);
+      await deleteStudentFromSupabase(b, studentId);
 
       // Immediately after successful Supabase deletion, remove node & broadcast in Firebase Realtime Database
       await broadcastFirebaseDeletion({
@@ -833,14 +842,20 @@ export function dualSyncStudentDelete(barcode: string) {
   });
 }
 
-export function dualSyncAttendanceDelete(barcode: string, dateKey?: string) {
+export function dualSyncAttendanceDelete(barcode: string, dateKey?: string, attendanceId?: string | number) {
   const b = String(barcode).trim();
   const dKey = dateKey || getTodayDateKey();
+
+  // 0️⃣ Durable Tombstone to prevent Zombie Resurrection
+  runInBackground(
+    recordTombstone("ATTENDANCE", `${b}_${dKey}`, "admin", "User deleted attendance"),
+    "Record attendance tombstone"
+  );
 
   // 1️⃣ Real Database Deletion: Direct Supabase DELETE by primary key id, immediately followed by Firebase RTDB node removal & broadcast
   runInBackground(
     (async () => {
-      await deleteAttendanceFromSupabase(b, dKey);
+      await deleteAttendanceFromSupabase(b, dKey, attendanceId);
 
       // Immediately after successful Supabase deletion, remove node & broadcast in Firebase Realtime Database
       await broadcastFirebaseDeletion({
