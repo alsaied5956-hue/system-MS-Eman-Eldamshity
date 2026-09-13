@@ -54,6 +54,12 @@ import {
   broadcastMultiDevicePong,
   fetchFullDirectoryFromSupabase,
 } from "./utils/supabaseClient";
+import {
+  subscribeToFirebaseLiveScans,
+  subscribeToFirebasePayments,
+  subscribeToFirebaseGroups,
+  subscribeToFirebaseAttendanceStatus,
+} from "./utils/firebaseRealtime";
 import { getPersistentDeviceId, getPersistentDeviceName } from "./utils/deviceClient";
 import {
   dualSyncLiveScan,
@@ -221,21 +227,26 @@ export default function App() {
     // Restore full historical snapshot from IndexedDB if localStorage was capped by quota
     hydrateFromIndexedDB().catch(() => {});
 
-    // 1. Fetch full student directory and records from Supabase in background
+    // 1. Fetch authoritative student directory, today's attendance, and payments from Supabase
     fetchFullDirectoryFromSupabase().then((res) => {
       if (res && res.students && res.students.length > 0) {
         setStudents((prev) => {
-          const map = new Map(prev.map((s) => [s.barcode, s]));
-          res.students.forEach((s) => {
-            if (!map.has(s.barcode)) {
-              map.set(s.barcode, s);
-            }
-          });
-          return Array.from(map.values());
+          const map = new Map<string, Student>();
+          // Fill with local items first
+          prev.forEach((s) => map.set(String(s.barcode).trim(), s));
+          // Overwrite with authoritative Supabase records
+          res.students.forEach((s) => map.set(String(s.barcode).trim(), s as Student));
+          const unified = Array.from(map.values());
+          appStudentsRef.current = unified;
+          return unified;
         });
 
         if (res.attendanceToday && Object.keys(res.attendanceToday).length > 0) {
-          setAttendanceToday((prev) => ({ ...prev, ...res.attendanceToday }));
+          setAttendanceToday((prev) => {
+            const next = { ...prev, ...res.attendanceToday };
+            attendanceTodayRef.current = next;
+            return next;
+          });
         }
 
         if (res.payments && Object.keys(res.payments).length > 0) {
@@ -244,6 +255,7 @@ export default function App() {
             for (const [m, recs] of Object.entries(res.payments)) {
               nextPayments[m] = { ...(nextPayments[m] || {}), ...recs };
             }
+            paymentsRef.current = nextPayments;
             return nextPayments;
           });
         }
@@ -405,44 +417,68 @@ export default function App() {
   scanLogOrderRef.current = scanLogOrder;
   const scanLogTimesRef = useRef(scanLogTimes);
   scanLogTimesRef.current = scanLogTimes;
+  const paymentsRef = useRef(payments);
+  paymentsRef.current = payments;
 
   // ⚡ Central Supabase Realtime Hub: Listen to Group Finalization, Payments, and Students across all devices (<20ms)
   useEffect(() => {
-    const unsubGroup = subscribeToGroupFinished((payload) => {
+    // Deduplication tracker across Supabase WebSocket & Firebase Realtime Database
+    const recentHandledEvents = new Map<string, number>();
+    const isRecentlyProcessed = (key: string, windowMs: number = 2500): boolean => {
+      const now = Date.now();
+      const last = recentHandledEvents.get(key);
+      if (last && now - last < windowMs) return true;
+      recentHandledEvents.set(key, now);
+      return false;
+    };
+
+    const handleIncomingGroupFinished = (payload: any) => {
+      if (payload.sourceDeviceId && payload.sourceDeviceId === currentDevId) return;
+      const dedupeKey = `group_${payload.dateKey}_${payload.grade}_${payload.days}`;
+      if (isRecentlyProcessed(dedupeKey)) return;
+
       setSyncBanner({
         show: true,
         type: "online-synced",
-        message: `⚡ تم تقفيل وحفظ غياب وحضور [${payload.grade} - ${payload.days}] بواسطة (${payload.finishedBy}) وتحديث جهازك فورياً!`,
+        message: `⚡ تم إنهاء وتثبيت حضور مجموعة (${payload.grade} - ${payload.days}) بواسطة (${payload.finishedBy || "الماسح"})!`,
       });
       setTimeout(() => setSyncBanner(null), 5000);
 
-      setAttendanceToday((prev) => {
-        const next = { ...prev };
-        payload.absentBarcodes.forEach((b) => (next[b] = "غائب"));
-        payload.lateBarcodes.forEach((b) => (next[b] = "تأخير"));
-        payload.presentBarcodes.forEach((b) => (next[b] = "حضور"));
-        attendanceTodayRef.current = next;
-        return next;
-      });
+      const todayKey = getTodayKey();
+      if (payload.dateKey === todayKey) {
+        setAttendanceToday((prev) => {
+          const next = { ...prev };
+          payload.absentBarcodes.forEach((b: string) => (next[b] = "غائب"));
+          payload.lateBarcodes.forEach((b: string) => (next[b] = "تأخير"));
+          payload.presentBarcodes.forEach((b: string) => (next[b] = "حضور"));
+          attendanceTodayRef.current = next;
+          return next;
+        });
+      }
 
       setAttendanceHistory((prev) => {
         const dayMap = { ...(prev[payload.dateKey] || {}) };
-        payload.absentBarcodes.forEach((b) => (dayMap[b] = "غائب"));
-        payload.lateBarcodes.forEach((b) => (dayMap[b] = "تأخير"));
-        payload.presentBarcodes.forEach((b) => (dayMap[b] = "حضور"));
+        payload.absentBarcodes.forEach((b: string) => (dayMap[b] = "غائب"));
+        payload.lateBarcodes.forEach((b: string) => (dayMap[b] = "تأخير"));
+        payload.presentBarcodes.forEach((b: string) => (dayMap[b] = "حضور"));
         const nextHist = { ...prev, [payload.dateKey]: dayMap };
         attendanceHistoryRef.current = nextHist;
         return nextHist;
       });
+    };
 
-      // NOTE: Preserving scanLogOrder across devices so students remain visible in the hall
-    });
+    const unsubGroup = subscribeToGroupFinished(handleIncomingGroupFinished);
+    const unsubFbGroup = subscribeToFirebaseGroups(handleIncomingGroupFinished);
 
-    const unsubPayment = subscribeToPaymentChanges((payload) => {
+    const handleIncomingPaymentChange = (payload: any) => {
+      if (payload.sourceDeviceId && payload.sourceDeviceId === currentDevId) return;
+      const dedupeKey = `pay_${payload.monthKey}_${payload.barcode}_${payload.action}`;
+      if (isRecentlyProcessed(dedupeKey)) return;
+
       setSyncBanner({
         show: true,
         type: "online-synced",
-        message: `⚡ تحديث مالي فوري: تم تسجيل سداد شهر (${payload.monthKey}) للطالب (${payload.barcode})!`,
+        message: `⚡ تحديث مالي فوري: تم ${payload.action === "delete" ? "حذف سداد" : "تسجيل سداد"} شهر (${payload.monthKey}) للطالب (${payload.barcode})!`,
       });
       setTimeout(() => setSyncBanner(null), 4000);
 
@@ -468,28 +504,40 @@ export default function App() {
           };
           updated[payload.monthKey] = m;
         }
+        paymentsRef.current = updated;
         return updated;
       });
-    });
+    };
+
+    const unsubPayment = subscribeToPaymentChanges(handleIncomingPaymentChange);
+    const unsubFbPayment = subscribeToFirebasePayments(handleIncomingPaymentChange);
 
     const unsubStudent = subscribeToStudentChanges((payload) => {
       if (payload.action === "add" && payload.studentData) {
         setStudents((prev) => {
           if (prev.some((s) => s.barcode === payload.barcode)) return prev;
-          return [payload.studentData, ...prev];
+          const next = [payload.studentData, ...prev];
+          appStudentsRef.current = next;
+          return next;
         });
       } else if (payload.action === "update" && payload.studentData) {
-        setStudents((prev) =>
-          prev.map((s) => (s.barcode === payload.barcode ? payload.studentData : s))
-        );
+        setStudents((prev) => {
+          const next = prev.map((s) => (s.barcode === payload.barcode ? payload.studentData : s));
+          appStudentsRef.current = next;
+          return next;
+        });
       } else if (payload.action === "delete") {
-        setStudents((prev) => prev.filter((s) => s.barcode !== payload.barcode));
+        setStudents((prev) => {
+          const next = prev.filter((s) => s.barcode !== payload.barcode);
+          appStudentsRef.current = next;
+          return next;
+        });
       }
     });
 
     const unsubExamGrade = subscribeToExamGradeChanges((payload) => {
-      setStudents((prev) =>
-        prev.map((s) => {
+      setStudents((prev) => {
+        const next = prev.map((s) => {
           if (s.barcode === payload.barcode) {
             const pct = payload.percentage;
             const scoreFormatted = `${payload.score}/${payload.maxScore} (${pct}%)`;
@@ -504,37 +552,48 @@ export default function App() {
             };
           }
           return s;
-        })
-      );
+        });
+        appStudentsRef.current = next;
+        return next;
+      });
     });
 
     const currentDevId = getPersistentDeviceId();
     const currentDevName = getPersistentDeviceName();
 
-    // ⚡ Instant Multi-Device Live Scan Reception
-    const unsubLiveScan = subscribeToLiveScans((payload) => {
-      // Ignore scans originating from THIS device
+    // ⚡ Instant Multi-Device Live Scan Reception (Dual Supabase WebSocket + Firebase RTDB)
+    const handleIncomingLiveScan = (payload: any) => {
       if (payload.sourceDeviceId && payload.sourceDeviceId === currentDevId) {
         return;
       }
 
       const b = String(payload.barcode).trim();
+      const dedupeKey = `scan_${b}_${payload.status}`;
+      if (isRecentlyProcessed(dedupeKey)) {
+        return;
+      }
+
       const status = payload.status === "تأخير" ? "تأخير" : "حضور";
       const timeIso = payload.timeIso || new Date().toISOString();
       const dateKey = getTodayKey();
 
-      setAttendanceToday((prev) => ({ ...prev, [b]: status }));
+      setAttendanceToday((prev) => {
+        const next = { ...prev, [b]: status };
+        attendanceTodayRef.current = next;
+        return next;
+      });
       setAttendanceHistory((prev) => {
         const dayMap = { ...(prev[dateKey] || {}) };
         dayMap[b] = status;
-        return { ...prev, [dateKey]: dayMap };
+        const next = { ...prev, [dateKey]: dayMap };
+        attendanceHistoryRef.current = next;
+        return next;
       });
       setScanLogOrder((prev) => (prev.includes(b) ? prev : [b, ...prev]));
       setScanLogTimes((prev) => ({ ...prev, [b]: timeIso }));
 
-      // Also increment student total attendance days if first time today
-      setStudents((prev) =>
-        prev.map((s) => {
+      setStudents((prev) => {
+        const next = prev.map((s) => {
           if (s.barcode === b) {
             return {
               ...s,
@@ -542,18 +601,43 @@ export default function App() {
             };
           }
           return s;
-        })
-      );
+        });
+        appStudentsRef.current = next;
+        return next;
+      });
 
       setSyncBanner({
         show: true,
         type: "online-synced",
-        message: `⚡ مسح لحظي من (${payload.scannedBy || "جهاز مساعد آخر"}): تم تسجيل ${status} للطالب (${payload.name}) في تمام (${payload.timeDisplay || "الآن"})!`,
+        message: `⚡ مسح لحظي من (${payload.scannedBy || "جهاز مساعد"}): تم تسجيل ${status} للطالب (${payload.name}) في تمام (${payload.timeDisplay || "الآن"})!`,
       });
       setTimeout(() => setSyncBanner(null), 4500);
+    };
+
+    const unsubLiveScan = subscribeToLiveScans(handleIncomingLiveScan);
+    const unsubFbLiveScan = subscribeToFirebaseLiveScans(handleIncomingLiveScan);
+
+    const unsubFbAttendanceStatus = subscribeToFirebaseAttendanceStatus((payload) => {
+      if (payload.sourceDeviceId && payload.sourceDeviceId === currentDevId) return;
+      const b = String(payload.barcode).trim();
+      const st = payload.status === "تأخير" ? "تأخير" : payload.status === "حضور" ? "حضور" : "غياب";
+      setAttendanceToday((prev) => {
+        const next = { ...prev, [b]: st };
+        attendanceTodayRef.current = next;
+        return next;
+      });
+      if (payload.dateKey) {
+        setAttendanceHistory((prev) => {
+          const dayMap = { ...(prev[payload.dateKey] || {}) };
+          dayMap[b] = st === "غياب" ? "غائب" : st;
+          const next = { ...prev, [payload.dateKey]: dayMap };
+          attendanceHistoryRef.current = next;
+          return next;
+        });
+      }
     });
 
-    // ⚡ Multi-Device Diagnostic Ping Responder: Auto-reply to ping requests from other devices
+    // ⚡ Multi-Device Diagnostic Ping Responder
     const unsubPing = subscribeToMultiDevicePing((payload) => {
       if (payload.sourceDeviceId && payload.sourceDeviceId !== currentDevId) {
         broadcastMultiDevicePong({
@@ -568,10 +652,14 @@ export default function App() {
 
     return () => {
       unsubGroup();
+      unsubFbGroup();
       unsubPayment();
+      unsubFbPayment();
       unsubStudent();
       unsubExamGrade();
       unsubLiveScan();
+      unsubFbLiveScan();
+      unsubFbAttendanceStatus();
       unsubPing();
     };
   }, []);

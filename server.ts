@@ -176,12 +176,29 @@ let serverFirestoreDb: any = null;
 function initServerFirestore() {
   if (serverFirestoreDb) return serverFirestoreDb;
   try {
+    let firebaseConfig: any = {};
     const configPath = path.join(process.cwd(), "firebase-applet-config.json");
     if (fs.existsSync(configPath)) {
-      const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      const app = getApps().length === 0 ? initializeApp(config) : getApps()[0];
-      serverFirestoreDb = getFirestore(app, config.firestoreDatabaseId);
-      console.log("[Sync Hub] Initialized Firebase Firestore server bridge");
+      firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    }
+
+    const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || firebaseConfig.apiKey;
+    const authDomain = process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || firebaseConfig.authDomain;
+    const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || firebaseConfig.projectId;
+    const databaseURL = process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL || firebaseConfig.databaseURL;
+    const firestoreDatabaseId = firebaseConfig.firestoreDatabaseId;
+
+    if (apiKey && projectId) {
+      const mergedConfig = {
+        ...firebaseConfig,
+        apiKey,
+        authDomain,
+        projectId,
+        databaseURL,
+      };
+      const app = getApps().length === 0 ? initializeApp(mergedConfig) : getApps()[0];
+      serverFirestoreDb = getFirestore(app, firestoreDatabaseId);
+      console.log("[Sync Hub] Initialized Firebase Firestore server bridge with project:", projectId);
       return serverFirestoreDb;
     }
   } catch (err) {

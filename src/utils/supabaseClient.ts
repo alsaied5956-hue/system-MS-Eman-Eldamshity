@@ -5,11 +5,14 @@
  */
 
 import { createClient, SupabaseClient, RealtimeChannel } from "@supabase/supabase-js";
+import { SUPABASE_CONFIG, logDatabaseConfiguration } from "./envConfig";
+import centerBackup from "../data/centerBackup.json";
 
-const SUPABASE_URL =
-  (import.meta as any).env?.VITE_SUPABASE_URL || "https://lzdvmzumwuqycwdecaan.supabase.co";
-const SUPABASE_ANON_KEY =
-  (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || "sb_publishable_B2ATdO71x3VxvOL18ATZtA_bupiDf3l";
+// Log configuration status on startup
+logDatabaseConfiguration();
+
+const SUPABASE_URL = SUPABASE_CONFIG.url;
+const SUPABASE_ANON_KEY = SUPABASE_CONFIG.anonKey;
 
 export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
@@ -919,7 +922,25 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
     }
 
     if (allStudentsRows.length === 0) {
-      return null;
+      try {
+        if (centerBackup && Array.isArray((centerBackup as any).students) && (centerBackup as any).students.length > 0) {
+          console.log("[Supabase] Empty database detected. Auto-populating initial directory to Supabase...");
+          await saveBulkStudentsToSupabase((centerBackup as any).students);
+          const { data: seededRows } = await supabase
+            .from("students")
+            .select("id, barcode, name, phone, parent_phone, grade, group_days, group_time, monthly_fee, notes, is_active, created_at")
+            .eq("is_active", true)
+            .limit(1000);
+          if (Array.isArray(seededRows) && seededRows.length > 0) {
+            allStudentsRows = seededRows;
+          }
+        }
+      } catch (seedErr) {
+        console.warn("[Supabase] Initial seed notice:", seedErr);
+      }
+      if (allStudentsRows.length === 0) {
+        return null;
+      }
     }
 
     const mappedStudents = allStudentsRows.map((row) => ({

@@ -9,7 +9,9 @@ import {
   Firestore
 } from "firebase/firestore";
 import { getAuth, signInAnonymously, onAuthStateChanged, Auth } from "firebase/auth";
-import config from "../../firebase-applet-config.json";
+import { FIREBASE_CONFIG, logDatabaseConfiguration } from "./envConfig";
+
+logDatabaseConfiguration();
 
 // Suppress benign connection retry / quota / offline notice logs from spamming console
 try {
@@ -18,8 +20,8 @@ try {
   // Ignore
 }
 
-// Initialize Firebase App
-export const app = getApps().length === 0 ? initializeApp(config) : getApp();
+// Initialize Firebase App with resolved environment variables
+export const app = getApps().length === 0 ? initializeApp(FIREBASE_CONFIG) : getApp();
 
 // Initialize Auth and ensure anonymous session is established if supported
 export const auth: Auth = getAuth(app);
@@ -130,10 +132,10 @@ try {
     {
       localCache: memoryLocalCache(),
     },
-    config.firestoreDatabaseId || undefined
+    FIREBASE_CONFIG.firestoreDatabaseId || undefined
   );
 } catch {
-  dbInstance = getFirestore(app, config.firestoreDatabaseId || undefined);
+  dbInstance = getFirestore(app, FIREBASE_CONFIG.firestoreDatabaseId || undefined);
 }
 
 export const db = dbInstance;

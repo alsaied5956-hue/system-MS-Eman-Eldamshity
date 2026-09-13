@@ -38,6 +38,12 @@ import {
   queueAttendanceScanForBatch,
   flushPendingAttendanceBatchToSupabase,
 } from "./supabaseClient";
+import {
+  broadcastFirebaseLiveScan,
+  broadcastFirebasePayment,
+  broadcastFirebaseGroupFinished,
+  broadcastFirebaseAttendanceStatus,
+} from "./firebaseRealtime";
 import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./liveEventStream";
 import { recordDeviceEntryExitScan, getPersistentDeviceId } from "./deviceClient";
 import { Student } from "../types";
@@ -101,6 +107,26 @@ export function dualSyncLiveScan(params: ScanSyncParams) {
       sourceDeviceId: params.sourceDeviceId || getPersistentDeviceId(),
     }),
     "Supabase broadcastLiveScan"
+  );
+
+  // 1.5️⃣ Firebase Realtime Database Broadcast (<50ms to all remote devices)
+  runInBackground(
+    broadcastFirebaseLiveScan({
+      barcode: b,
+      name: params.name,
+      grade: params.grade,
+      days: params.days,
+      status: normalizedStatus,
+      timeIso: params.timeIso,
+      timeDisplay:
+        params.timeDisplay ||
+        new Date(params.timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }),
+      isPaid: !!params.isPaid,
+      scannedBy: params.scannedBy || "الماسح",
+      timestamp: Date.now(),
+      sourceDeviceId: params.sourceDeviceId || getPersistentDeviceId(),
+    }),
+    "Firebase RTDB broadcastFirebaseLiveScan"
   );
 
   // 2️⃣ Smart Write-Batching: Queue in local memory, committed in bulk every 30s or on Save & Send
@@ -226,6 +252,22 @@ export function dualSyncGroupFinished(params: GroupFinishedSyncParams) {
     "Supabase broadcastGroupFinished"
   );
 
+  // 1.5️⃣ Firebase Realtime Database Group Broadcast
+  runInBackground(
+    broadcastFirebaseGroupFinished({
+      grade: params.grade,
+      days: params.days,
+      absentBarcodes: params.absentBarcodes,
+      lateBarcodes: params.lateBarcodes,
+      presentBarcodes: params.presentBarcodes,
+      dateKey,
+      finishedBy: params.finishedBy || "الماسح",
+      timestamp: Date.now(),
+      sourceDeviceId: getPersistentDeviceId(),
+    }),
+    "Firebase RTDB broadcastFirebaseGroupFinished"
+  );
+
   // 2️⃣ Supabase Postgres bulk upsert into attendance_logs table
   const supabaseRecords = params.allStudents
     .filter((s) => {
@@ -337,6 +379,19 @@ export function dualSyncAttendanceStatusChange(params: {
     "Supabase status update"
   );
 
+  // Firebase Realtime Database
+  runInBackground(
+    broadcastFirebaseAttendanceStatus({
+      barcode: b,
+      status: normalizedStatus,
+      dateKey,
+      updatedBy: params.updatedBy || "admin",
+      timestamp: Date.now(),
+      sourceDeviceId: getPersistentDeviceId(),
+    }),
+    "Firebase RTDB broadcastFirebaseAttendanceStatus"
+  );
+
   // Firebase
   runInBackground(
     (async () => {
@@ -392,6 +447,23 @@ export function dualSyncPaymentRecord(params: {
       timestamp: Date.now(),
     }),
     "Supabase broadcastPaymentChange (record)"
+  );
+
+  // 1.5️⃣ Firebase Realtime Database Payment Broadcast
+  runInBackground(
+    broadcastFirebasePayment({
+      action: "record",
+      barcode: b,
+      monthKey: params.monthKey,
+      amount,
+      date: params.date,
+      time,
+      note: params.note || "سداد اشتراك",
+      recordedBy: params.recordedBy || "admin",
+      timestamp: Date.now(),
+      sourceDeviceId: getPersistentDeviceId(),
+    }),
+    "Firebase RTDB broadcastFirebasePayment (record)"
   );
 
   // 2️⃣ Supabase Postgres payments table
@@ -482,6 +554,23 @@ export function dualSyncPaymentUpdate(params: {
     "Supabase broadcastPaymentChange (update)"
   );
 
+  // 1.5️⃣ Firebase Realtime Database Payment Update Broadcast
+  runInBackground(
+    broadcastFirebasePayment({
+      action: "update",
+      barcode: b,
+      monthKey: params.newMonthKey,
+      amount: params.newAmount,
+      date: params.newDate,
+      time,
+      note: params.newNote || "تعديل سداد اشتراك",
+      recordedBy: params.recordedBy || "admin",
+      timestamp: Date.now(),
+      sourceDeviceId: getPersistentDeviceId(),
+    }),
+    "Firebase RTDB broadcastFirebasePayment (update)"
+  );
+
   // 2️⃣ Supabase Postgres
   runInBackground(
     (async () => {
@@ -546,6 +635,19 @@ export function dualSyncPaymentDelete(params: { barcode: string; monthKey: strin
       timestamp: Date.now(),
     }),
     "Supabase broadcastPaymentChange (delete)"
+  );
+
+  // 1.5️⃣ Firebase Realtime Database Payment Delete Broadcast
+  runInBackground(
+    broadcastFirebasePayment({
+      action: "delete",
+      barcode: b,
+      monthKey: params.monthKey,
+      amount: 0,
+      timestamp: Date.now(),
+      sourceDeviceId: getPersistentDeviceId(),
+    }),
+    "Firebase RTDB broadcastFirebasePayment (delete)"
   );
 
   // 2️⃣ Supabase Postgres
