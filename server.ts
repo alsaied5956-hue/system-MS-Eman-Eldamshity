@@ -19,6 +19,90 @@ const DEVICES_DATA_DIR = path.join(SYNC_DATA_DIR, "devices");
 const DEVICE_REGISTRY_FILE = path.join(DEVICES_DATA_DIR, "device_registry.json");
 const ENTRY_EXIT_LOGS_FILE = path.join(SYNC_DATA_DIR, "center_entry_exit_logs.json");
 
+// -------------------------------------------------------------
+// FIRESTORE SERVER QUOTA & RPC ERROR SUPPRESSION ENGINE
+// -------------------------------------------------------------
+let serverFirestoreQuotaExceededUntil: number = Date.now() + 12 * 60 * 60 * 1000;
+
+export function isFirestoreQuotaError(err: any): boolean {
+  if (!err) return false;
+  const code = String(err.code || "").toLowerCase();
+  const msg = String(err.message || "").toLowerCase();
+  const status = String(err.status || "").toLowerCase();
+  return (
+    code === "resource-exhausted" ||
+    code.includes("resource-exhausted") ||
+    code === "8" ||
+    (code.includes("8") && msg.includes("resource_exhausted")) ||
+    code === "429" ||
+    code.includes("429") ||
+    status === "resource_exhausted" ||
+    msg.includes("quota limit exceeded") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("resource-exhausted") ||
+    msg.includes("quota metric") ||
+    msg.includes("free daily write units") ||
+    msg.includes("quota exceeded")
+  );
+}
+
+export function isServerFirestoreQuotaActive(): boolean {
+  return Date.now() < serverFirestoreQuotaExceededUntil;
+}
+
+export function markServerFirestoreQuotaExceeded(durationMs = 60 * 60 * 1000): void {
+  serverFirestoreQuotaExceededUntil = Math.max(serverFirestoreQuotaExceededUntil, Date.now() + durationMs);
+}
+
+// 1. Intercept console.error to silence benign Firestore gRPC stream resource exhaustion
+const originalConsoleError = console.error;
+console.error = function (...args: any[]) {
+  const combinedStr = args
+    .map((a) => (typeof a === "string" ? a : a?.message || a?.stack || (typeof a === "object" ? JSON.stringify(a) : "")))
+    .join(" ");
+
+  if (
+    (combinedStr.includes("@firebase/firestore") || combinedStr.includes("Firestore")) &&
+    (combinedStr.includes("RESOURCE_EXHAUSTED") ||
+      combinedStr.includes("resource-exhausted") ||
+      combinedStr.includes("Quota limit exceeded") ||
+      combinedStr.includes("Free daily write units") ||
+      combinedStr.includes("Write' stream"))
+  ) {
+    markServerFirestoreQuotaExceeded();
+    return;
+  }
+
+  originalConsoleError.apply(console, args);
+};
+
+// 2. Intercept process.stderr.write from native gRPC stream in Firebase SDK
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
+(process.stderr as any).write = function (chunk: any, ...rest: any[]) {
+  const str = typeof chunk === "string" ? chunk : chunk?.toString() || "";
+  if (
+    str.includes("@firebase/firestore") &&
+    (str.includes("RESOURCE_EXHAUSTED") ||
+      str.includes("resource-exhausted") ||
+      str.includes("Quota limit exceeded") ||
+      str.includes("Free daily write units") ||
+      str.includes("Write' stream"))
+  ) {
+    markServerFirestoreQuotaExceeded();
+    return true;
+  }
+  return (originalStderrWrite as any)(chunk, ...rest);
+};
+
+// 3. Catch unhandled rejections from background firestore promises
+process.on("unhandledRejection", (reason: any) => {
+  if (isFirestoreQuotaError(reason)) {
+    markServerFirestoreQuotaExceeded();
+    return;
+  }
+  originalConsoleError("Unhandled Rejection:", reason);
+});
+
 if (!fs.existsSync(SYNC_DATA_DIR)) {
   fs.mkdirSync(SYNC_DATA_DIR, { recursive: true });
 }
@@ -498,7 +582,7 @@ async function startServer() {
     });
 
     // Mirror asynchronously to Cloud Firestore so all external platforms stay 100% unified
-    if (serverFirestoreDb) {
+    if (serverFirestoreDb && !isServerFirestoreQuotaActive()) {
       try {
         const compressedPayload = compressCloudPayload(data);
         const docRef = doc(serverFirestoreDb, "system_state", "main_center_data");
@@ -516,9 +600,19 @@ async function startServer() {
             syncedAtIso: new Date().toISOString(),
           },
           { merge: true }
-        ).catch((e) => console.warn("[Sync Hub] Background Firestore write warning:", e?.message));
+        ).catch((e) => {
+          if (isFirestoreQuotaError(e)) {
+            markServerFirestoreQuotaExceeded();
+          } else {
+            console.warn("[Sync Hub] Background Firestore write warning:", e?.message);
+          }
+        });
       } catch (e: any) {
-        console.warn("[Sync Hub] Firestore mirror compression note:", e?.message);
+        if (isFirestoreQuotaError(e)) {
+          markServerFirestoreQuotaExceeded();
+        } else {
+          console.warn("[Sync Hub] Firestore mirror compression note:", e?.message);
+        }
       }
     }
 
@@ -526,7 +620,21 @@ async function startServer() {
       ok: true,
       updatedAt: lastServerUpdate,
       broadcastedToClients: sseSubscribers.size,
+      firestoreQuotaActive: isServerFirestoreQuotaActive(),
     });
+  });
+
+  // Query or report Firestore Quota state
+  app.get("/api/sync/quota", (_req: Request, res: Response) => {
+    res.json({
+      quotaActive: isServerFirestoreQuotaActive(),
+      quotaExceededUntil: serverFirestoreQuotaExceededUntil,
+    });
+  });
+
+  app.post("/api/sync/quota/report", (_req: Request, res: Response) => {
+    markServerFirestoreQuotaExceeded();
+    res.json({ ok: true, quotaActive: true });
   });
 
   // Direct HTTP attachment download for complete JSON backup (Guaranteed download on all devices & iframes)

@@ -19,7 +19,13 @@
  */
 
 import { doc, setDoc, deleteDoc, writeBatch } from "firebase/firestore";
-import { db, ensureFirebaseAuth } from "./firebase";
+import {
+  db,
+  ensureFirebaseAuth,
+  isFirestoreQuotaActive,
+  isFirestoreQuotaError,
+  markFirestoreQuotaExceeded,
+} from "./firebase";
 import {
   broadcastLiveScan,
   broadcastGroupFinished,
@@ -59,8 +65,31 @@ import {
 // Safe non-blocking execution wrapper
 function runInBackground(promise: Promise<any>, opName: string) {
   promise.catch((err) => {
+    if (isFirestoreQuotaError(err)) {
+      markFirestoreQuotaExceeded();
+      return;
+    }
     console.warn(`[DualSync] Notice during background sync (${opName}):`, err?.message || err);
   });
+}
+
+function runFirestoreWrite(opName: string, writeFn: () => Promise<any>) {
+  if (isFirestoreQuotaActive()) return;
+  runInBackground(
+    (async () => {
+      try {
+        await ensureFirebaseAuth();
+        await writeFn();
+      } catch (err: any) {
+        if (isFirestoreQuotaError(err)) {
+          markFirestoreQuotaExceeded();
+        } else {
+          throw err;
+        }
+      }
+    })(),
+    opName
+  );
 }
 
 // ------------------------------------------------------------------------
@@ -156,28 +185,24 @@ export function dualSyncLiveScan(params: ScanSyncParams) {
   );
 
   // 4️⃣ Firebase Firestore individual attendance collection: attendance_records/{dateKey}_{barcode}
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "attendance_records", `${dateKey}_${b}`);
-      await setDoc(
-        ref,
-        {
-          barcode: b,
-          studentName: params.name,
-          grade: params.grade,
-          days: params.days,
-          status: normalizedStatus,
-          dateKey,
-          timeIso: params.timeIso,
-          recordedAt: Date.now(),
-          scannedBy: params.scannedBy || "الماسح",
-        },
-        { merge: true }
-      );
-    })(),
-    "Firebase attendance_records individual doc"
-  );
+  runFirestoreWrite("Firebase attendance_records individual doc", async () => {
+    const ref = doc(db, "attendance_records", `${dateKey}_${b}`);
+    await setDoc(
+      ref,
+      {
+        barcode: b,
+        studentName: params.name,
+        grade: params.grade,
+        days: params.days,
+        status: normalizedStatus,
+        dateKey,
+        timeIso: params.timeIso,
+        recordedAt: Date.now(),
+        scannedBy: params.scannedBy || "الماسح",
+      },
+      { merge: true }
+    );
+  });
 
   // 5️⃣ Isolated Device API scan logging (Zero-cache, device-specific ledger)
   runInBackground(
@@ -313,36 +338,32 @@ export function dualSyncGroupFinished(params: GroupFinishedSyncParams) {
   }
 
   // 4️⃣ Firebase Firestore individual attendance docs in batch chunks
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const chunkSize = 400;
-      for (let i = 0; i < supabaseRecords.length; i += chunkSize) {
-        const chunk = supabaseRecords.slice(i, i + chunkSize);
-        const batch = writeBatch(db);
-        chunk.forEach((item) => {
-          const docRef = doc(db, "attendance_records", `${dateKey}_${item.barcode}`);
-          batch.set(
-            docRef,
-            {
-              barcode: item.barcode,
-              studentName: item.studentName,
-              grade: params.grade,
-              days: params.days,
-              status: item.status,
-              dateKey,
-              timeIso: new Date().toISOString(),
-              recordedAt: Date.now(),
-              scannedBy: params.finishedBy || "admin",
-            },
-            { merge: true }
-          );
-        });
-        await batch.commit();
-      }
-    })(),
-    "Firebase batch attendance_records docs"
-  );
+  runFirestoreWrite("Firebase batch attendance_records docs", async () => {
+    const chunkSize = 400;
+    for (let i = 0; i < supabaseRecords.length; i += chunkSize) {
+      const chunk = supabaseRecords.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      chunk.forEach((item) => {
+        const docRef = doc(db, "attendance_records", `${dateKey}_${item.barcode}`);
+        batch.set(
+          docRef,
+          {
+            barcode: item.barcode,
+            studentName: item.studentName,
+            grade: params.grade,
+            days: params.days,
+            status: item.status,
+            dateKey,
+            timeIso: new Date().toISOString(),
+            recordedAt: Date.now(),
+            scannedBy: params.finishedBy || "admin",
+          },
+          { merge: true }
+        );
+      });
+      await batch.commit();
+    }
+  });
 }
 
 // ------------------------------------------------------------------------
@@ -395,26 +416,22 @@ export function dualSyncAttendanceStatusChange(params: {
   );
 
   // Firebase
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "attendance_records", `${dateKey}_${b}`);
-      await setDoc(
-        ref,
-        {
-          barcode: b,
-          studentName: params.studentName,
-          status: normalizedStatus,
-          dateKey,
-          timeIso: params.timeIso || new Date().toISOString(),
-          updatedAt: Date.now(),
-          scannedBy: params.updatedBy || "admin",
-        },
-        { merge: true }
-      );
-    })(),
-    "Firebase status update"
-  );
+  runFirestoreWrite("Firebase status update", async () => {
+    const ref = doc(db, "attendance_records", `${dateKey}_${b}`);
+    await setDoc(
+      ref,
+      {
+        barcode: b,
+        studentName: params.studentName,
+        status: normalizedStatus,
+        dateKey,
+        timeIso: params.timeIso || new Date().toISOString(),
+        updatedAt: Date.now(),
+        scannedBy: params.updatedBy || "admin",
+      },
+      { merge: true }
+    );
+  });
 }
 
 // ------------------------------------------------------------------------
@@ -483,27 +500,23 @@ export function dualSyncPaymentRecord(params: {
   );
 
   // 3️⃣ Firebase Firestore collection: payment_records/{monthKey}_{barcode}
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "payment_records", `${params.monthKey}_${b}`);
-      await setDoc(
-        ref,
-        {
-          barcode: b,
-          monthKey: params.monthKey,
-          amount,
-          date: params.date,
-          time,
-          note: params.note || "سداد اشتراك",
-          recordedBy: params.recordedBy || "admin",
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-    })(),
-    "Firebase payment_records doc"
-  );
+  runFirestoreWrite("Firebase payment_records doc", async () => {
+    const ref = doc(db, "payment_records", `${params.monthKey}_${b}`);
+    await setDoc(
+      ref,
+      {
+        barcode: b,
+        monthKey: params.monthKey,
+        amount,
+        date: params.date,
+        time,
+        note: params.note || "سداد اشتراك",
+        recordedBy: params.recordedBy || "admin",
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+  });
 
   // 4️⃣ Sub-Second Parent Digital Receipt Notification
   if (params.studentFallback?.parentPhone) {
@@ -593,31 +606,27 @@ export function dualSyncPaymentUpdate(params: {
   );
 
   // 3️⃣ Firebase Firestore
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      if (params.oldMonthKey !== params.newMonthKey) {
-        const oldRef = doc(db, "payment_records", `${params.oldMonthKey}_${b}`);
-        await deleteDoc(oldRef);
-      }
-      const newRef = doc(db, "payment_records", `${params.newMonthKey}_${b}`);
-      await setDoc(
-        newRef,
-        {
-          barcode: b,
-          monthKey: params.newMonthKey,
-          amount: params.newAmount,
-          date: params.newDate,
-          time,
-          note: params.newNote || "تعديل سداد اشتراك",
-          recordedBy: params.recordedBy || "admin",
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-    })(),
-    "Firebase payment update"
-  );
+  runFirestoreWrite("Firebase payment update", async () => {
+    if (params.oldMonthKey !== params.newMonthKey) {
+      const oldRef = doc(db, "payment_records", `${params.oldMonthKey}_${b}`);
+      await deleteDoc(oldRef);
+    }
+    const newRef = doc(db, "payment_records", `${params.newMonthKey}_${b}`);
+    await setDoc(
+      newRef,
+      {
+        barcode: b,
+        monthKey: params.newMonthKey,
+        amount: params.newAmount,
+        date: params.newDate,
+        time,
+        note: params.newNote || "تعديل سداد اشتراك",
+        recordedBy: params.recordedBy || "admin",
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+  });
 }
 
 export function dualSyncPaymentDelete(params: { barcode: string; monthKey: string }) {
@@ -657,14 +666,10 @@ export function dualSyncPaymentDelete(params: { barcode: string; monthKey: strin
   );
 
   // 3️⃣ Firebase Firestore
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "payment_records", `${params.monthKey}_${b}`);
-      await deleteDoc(ref);
-    })(),
-    "Firebase delete payment doc"
-  );
+  runFirestoreWrite("Firebase delete payment doc", async () => {
+    const ref = doc(db, "payment_records", `${params.monthKey}_${b}`);
+    await deleteDoc(ref);
+  });
 }
 
 // ------------------------------------------------------------------------
@@ -722,41 +727,37 @@ export function dualSyncExamGrade(params: ExamGradeSyncParams) {
   );
 
   // 3️⃣ Firebase Firestore collection: exam_records/{dateKey}_{barcode}
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "exam_records", `${dateKey}_${b}`);
-      await setDoc(
-        ref,
-        {
-          barcode: b,
-          studentName: params.studentName || "",
-          examTitle: params.examTitle,
-          score,
-          maxScore,
-          percentage,
-          dateKey,
-          notes: params.notes || "",
-          recordedBy: params.recordedBy || "admin",
-          recordedAt: Date.now(),
-        },
-        { merge: true }
-      );
+  runFirestoreWrite("Firebase exam_records & student update", async () => {
+    const ref = doc(db, "exam_records", `${dateKey}_${b}`);
+    await setDoc(
+      ref,
+      {
+        barcode: b,
+        studentName: params.studentName || "",
+        examTitle: params.examTitle,
+        score,
+        maxScore,
+        percentage,
+        dateKey,
+        notes: params.notes || "",
+        recordedBy: params.recordedBy || "admin",
+        recordedAt: Date.now(),
+      },
+      { merge: true }
+    );
 
-      // Also update student's last exam summary in Firestore students collection
-      const studentRef = doc(db, "students", b);
-      await setDoc(
-        studentRef,
-        {
-          lastExamTitle: params.examTitle,
-          lastExamScore: `${score}/${maxScore} (${percentage}%)`,
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-    })(),
-    "Firebase exam_records & student update"
-  );
+    // Also update student's last exam summary in Firestore students collection
+    const studentRef = doc(db, "students", b);
+    await setDoc(
+      studentRef,
+      {
+        lastExamTitle: params.examTitle,
+        lastExamScore: `${score}/${maxScore} (${percentage}%)`,
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+  });
 }
 
 // ------------------------------------------------------------------------
@@ -784,14 +785,10 @@ export function dualSyncStudentSave(student: Student, action: "add" | "update" =
   );
 
   // 3️⃣ Firebase Firestore: students/{barcode}
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "students", b);
-      await setDoc(ref, { ...student, updatedAt: Date.now() }, { merge: true });
-    })(),
-    "Firebase students/{barcode} doc"
-  );
+  runFirestoreWrite("Firebase students/{barcode} doc", async () => {
+    const ref = doc(db, "students", b);
+    await setDoc(ref, { ...student, updatedAt: Date.now() }, { merge: true });
+  });
 }
 
 export function dualSyncStudentDelete(barcode: string) {
@@ -830,14 +827,10 @@ export function dualSyncStudentDelete(barcode: string) {
   );
 
   // 3️⃣ Firebase Firestore
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "students", b);
-      await deleteDoc(ref);
-    })(),
-    "Firebase delete student doc"
-  );
+  runFirestoreWrite("Firebase delete student doc", async () => {
+    const ref = doc(db, "students", b);
+    await deleteDoc(ref);
+  });
 }
 
 export function dualSyncAttendanceDelete(barcode: string, dateKey?: string) {
@@ -862,14 +855,10 @@ export function dualSyncAttendanceDelete(barcode: string, dateKey?: string) {
   );
 
   // 2️⃣ Firebase Firestore
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const ref = doc(db, "attendance_records", `${dKey}_${b}`);
-      await deleteDoc(ref);
-    })(),
-    "Firebase delete attendance doc"
-  );
+  runFirestoreWrite("Firebase delete attendance doc", async () => {
+    const ref = doc(db, "attendance_records", `${dKey}_${b}`);
+    await deleteDoc(ref);
+  });
 }
 
 export function dualSyncBulkStudents(students: Student[]) {
@@ -882,21 +871,17 @@ export function dualSyncBulkStudents(students: Student[]) {
   );
 
   // 2️⃣ Firebase Firestore batch write
-  runInBackground(
-    (async () => {
-      await ensureFirebaseAuth();
-      const chunkSize = 400;
-      for (let i = 0; i < students.length; i += chunkSize) {
-        const chunk = students.slice(i, i + chunkSize);
-        const batch = writeBatch(db);
-        chunk.forEach((s) => {
-          const b = String(s.barcode).trim();
-          const ref = doc(db, "students", b);
-          batch.set(ref, { ...s, updatedAt: Date.now() }, { merge: true });
-        });
-        await batch.commit();
-      }
-    })(),
-    "Firebase bulk students batch write"
-  );
+  runFirestoreWrite("Firebase bulk students batch write", async () => {
+    const chunkSize = 400;
+    for (let i = 0; i < students.length; i += chunkSize) {
+      const chunk = students.slice(i, i + chunkSize);
+      const batch = writeBatch(db);
+      chunk.forEach((s) => {
+        const b = String(s.barcode).trim();
+        const ref = doc(db, "students", b);
+        batch.set(ref, { ...s, updatedAt: Date.now() }, { merge: true });
+      });
+      await batch.commit();
+    }
+  });
 }

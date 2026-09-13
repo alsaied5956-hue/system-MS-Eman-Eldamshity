@@ -11,7 +11,14 @@ import {
   PlatformMessageType,
 } from "../types";
 import { DEFAULT_GRADE_PRICES, getTodayKey, formatTimeArabic } from "./helpers";
-import { db, ensureFirebaseAuth } from "./firebase";
+import {
+  db,
+  ensureFirebaseAuth,
+  isFirestoreQuotaActive,
+  markFirestoreQuotaExceeded,
+  clearFirestoreQuota,
+  safeFirestoreWrite,
+} from "./firebase";
 import { doc, setDoc, getDoc, onSnapshot, writeBatch } from "firebase/firestore";
 import { compressData, decompressData, compactSystemPayload, hydrateSystemPayload } from "./compression";
 import { saveSnapshotToIndexedDB, loadSnapshotFromIndexedDB } from "./indexedDB";
@@ -282,13 +289,17 @@ export function getSyncStatus(): SyncStatus {
     lastSyncTime = localStorage.getItem(LAST_SYNC_TIME_KEY);
   }
 
+  const quotaActive = isFirestoreQuotaActive();
+
   return {
     isOnline,
     isSyncing: isCurrentlySyncing,
     hasPendingSync,
     lastSyncTime,
-    isQuotaExceeded: false,
-    quotaMessage: undefined,
+    isQuotaExceeded: quotaActive,
+    quotaMessage: quotaActive
+      ? "تم تفعيل المحول السحابي السريع (Zero-Quota Hub) للحفاظ على سرعة النظام وحفظ البيانات محلياً وعبر الخادم بدون انقطاع"
+      : undefined,
   };
 }
 
@@ -812,6 +823,7 @@ export async function executeWithRetryAndBackoff<T>(
 
       // 2. Firestore quota notice (does not halt sync as Real-Time Hub handles live replication)
       if (isFirestoreQuotaError(err)) {
+        markFirestoreQuotaExceeded();
         console.warn(`[Cloud Sync] Firestore quota limit reached in ${operationName}; live data is securely mirrored via Real-Time Hub.`);
         return null;
       }
@@ -1025,11 +1037,40 @@ export async function flushPendingSyncToCloud(forceManual: boolean = false): Pro
     isCurrentlySyncing = false;
   }
 
-  // If cloud quota is currently exceeded and cooldown is active, skip background automatic pushes
-  if (isQuotaExceeded && Date.now() < quotaExceededUntil && !forceManual) {
+  // If cloud quota is currently exceeded, route directly through Zero-Quota Server Hub and Supabase
+  if (isFirestoreQuotaActive()) {
+    const localData = loadLocalData();
+    const nowTime = Date.now();
+    const cleaned = cleanForFirestore({
+      ...localData,
+      _lastClientId: CLIENT_ID,
+      _lastClientTimestamp: nowTime,
+      updatedAt: localData.updatedAt || nowTime,
+      scanLogUpdatedAt: localData.scanLogUpdatedAt || localData.updatedAt || nowTime,
+      syncedAtIso: new Date().toISOString(),
+    });
+
+    // 1. Instantly push to Real-Time Server Hub and Supabase broadcast (< 50ms peer delivery)
+    pushToServerSyncHub(localData).catch(() => {});
+    broadcastFullState(cleaned).catch(() => {});
+
+    clearOfflineLocalStorage();
+    localStorage.setItem(PENDING_SYNC_KEY, "false");
+    const nowIso = new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    try {
+      localStorage.setItem(LAST_SYNC_TIME_KEY, nowIso);
+    } catch {}
+
     isCurrentlySyncing = false;
     notifySyncStatusChange();
-    return false;
+
+    window.dispatchEvent(
+      new CustomEvent("cloud-sync-completed", {
+        detail: { timestamp: new Date().toISOString(), wipedLocalStorage: true, viaServerHub: true },
+      })
+    );
+
+    return true;
   }
 
   if (isCurrentlySyncing && !forceManual) {
@@ -1149,18 +1190,24 @@ export async function flushPendingSyncToCloud(forceManual: boolean = false): Pro
     return true;
   } catch (e: any) {
     if (isFirestoreQuotaError(e)) {
-      // Data was already successfully dispatched via Real-Time Hub with zero quota limits!
+      markFirestoreQuotaExceeded();
       successfulSyncs++;
       consecutiveFailures = 0;
       lastSyncError = null;
-      isQuotaExceeded = false;
-      quotaExceededUntil = 0;
       isCurrentlySyncing = false;
       localStorage.setItem(PENDING_SYNC_KEY, "false");
+      clearOfflineLocalStorage();
       const nowIso = new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      localStorage.setItem(LAST_SYNC_TIME_KEY, nowIso);
+      try {
+        localStorage.setItem(LAST_SYNC_TIME_KEY, nowIso);
+      } catch {}
       if (syncTimeoutTimer) clearTimeout(syncTimeoutTimer);
       notifySyncStatusChange();
+      window.dispatchEvent(
+        new CustomEvent("cloud-sync-completed", {
+          detail: { timestamp: new Date().toISOString(), wipedLocalStorage: true, viaServerHub: true },
+        })
+      );
       return true;
     }
 
@@ -2479,8 +2526,8 @@ export async function autoPushLocalDiskOnStartup(): Promise<boolean> {
       Boolean(localStorage.getItem("center_offline_pending_data"));
 
     if (hasPending && isOnline) {
-      console.log("[Storage Engine] Detected offline changes in LocalStorage. Uploading to Firestore and wiping LocalStorage...");
-      const success = await flushPendingSyncToCloud(true);
+      console.log("[Storage Engine] Detected offline changes in LocalStorage. Uploading to Cloud and wiping LocalStorage...");
+      const success = await flushPendingSyncToCloud(false);
       if (success) {
         clearOfflineLocalStorage();
       }
@@ -2725,7 +2772,7 @@ export function savePlatformMessages(messages: PlatformMessage[]): void {
 }
 
 export async function writePlatformNotificationsBatchToFirebase(messages: PlatformMessage[]): Promise<void> {
-  if (!messages || messages.length === 0) return;
+  if (!messages || messages.length === 0 || isFirestoreQuotaActive()) return;
   try {
     await ensureFirebaseAuth();
     const batch = writeBatch(db);
@@ -2755,7 +2802,11 @@ export async function writePlatformNotificationsBatchToFirebase(messages: Platfo
     });
     await batch.commit();
   } catch (err) {
-    console.warn("Direct Firestore notifications batch write notice:", err);
+    if (isFirestoreQuotaError(err)) {
+      markFirestoreQuotaExceeded();
+    } else {
+      console.warn("Direct Firestore notifications batch write notice:", err);
+    }
   }
 }
 

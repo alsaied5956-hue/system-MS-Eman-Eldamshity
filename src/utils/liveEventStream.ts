@@ -1,5 +1,11 @@
 import { doc, setDoc, onSnapshot, arrayUnion } from "firebase/firestore";
-import { db, ensureFirebaseAuth } from "./firebase";
+import {
+  db,
+  ensureFirebaseAuth,
+  isFirestoreQuotaActive,
+  markFirestoreQuotaExceeded,
+  isFirestoreQuotaError,
+} from "./firebase";
 
 export interface LiveAttendanceEvent {
   studentId: string;
@@ -56,23 +62,28 @@ async function processLiveEventsQueue(): Promise<void> {
     } catch {}
   }
 
-  try {
-    await ensureFirebaseAuth();
-    const eventDocRef = doc(db, LIVE_EVENTS_DOC_PATH, LIVE_EVENTS_DOC_ID);
+  if (!isFirestoreQuotaActive()) {
+    try {
+      await ensureFirebaseAuth();
+      const eventDocRef = doc(db, LIVE_EVENTS_DOC_PATH, LIVE_EVENTS_DOC_ID);
 
-    await setDoc(
-      eventDocRef,
-      {
-        lastEvent: latestEvent,
-        recentBatch: eventsToProcess.slice(-10),
-        updatedAt: latestEvent.timestamp,
-      },
-      { merge: true }
-    );
-    lastLiveWriteTimestamp = Date.now();
-  } catch (err) {
-    // Graceful fallback on quota exhaustion or network drop
-    console.warn("Live event push notice (safe fallback):", err);
+      await setDoc(
+        eventDocRef,
+        {
+          lastEvent: latestEvent,
+          recentBatch: eventsToProcess.slice(-10),
+          updatedAt: latestEvent.timestamp,
+        },
+        { merge: true }
+      );
+      lastLiveWriteTimestamp = Date.now();
+    } catch (err) {
+      if (isFirestoreQuotaError(err)) {
+        markFirestoreQuotaExceeded();
+      } else {
+        console.warn("Live event push notice (safe fallback):", err);
+      }
+    }
   }
 
   isFlushingLiveEvents = false;

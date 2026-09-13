@@ -26,7 +26,13 @@ import {
   deterministicHash,
   requestStoragePersistence,
 } from "./dbSchema";
-import { db, ensureFirebaseAuth } from "../utils/firebase";
+import {
+  db,
+  ensureFirebaseAuth,
+  isFirestoreQuotaActive,
+  markFirestoreQuotaExceeded,
+  isFirestoreQuotaError,
+} from "../utils/firebase";
 import { doc, writeBatch } from "firebase/firestore";
 import { exportUnsyncedWALToJson } from "./emergencyBackup";
 
@@ -626,7 +632,7 @@ let isFlushingBatch = false;
 let consecutiveRateLimitFailures = 0;
 
 function scheduleBatchCoalesce(): void {
-  if (batchTimer || isFlushingBatch) return;
+  if (batchTimer || isFlushingBatch || isFirestoreQuotaActive()) return;
 
   batchTimer = setTimeout(() => {
     batchTimer = null;
@@ -643,6 +649,11 @@ export async function flushCoalescedBatch(forceImmediate = false): Promise<numbe
   if (isFlushingBatch) return 0;
   if (memoryWALQueue.length === 0) return 0;
   if (typeof window !== "undefined" && !navigator.onLine && !forceImmediate) return 0;
+
+  // If Firestore quota is active, do not attempt Firestore batch commit
+  if (isFirestoreQuotaActive()) {
+    return 0;
+  }
 
   // Verify clock drift before pushing cloud writes
   if (clockDriftState.hasDriftError) {
@@ -714,12 +725,12 @@ export async function flushCoalescedBatch(forceImmediate = false): Promise<numbe
     consecutiveRateLimitFailures = 0;
     recordSuccessfulSyncTimestamp();
   } catch (err: any) {
-    const isRateLimit = err?.code === "resource-exhausted" || err?.status === 429;
-    if (isRateLimit) {
+    if (isFirestoreQuotaError(err) || err?.code === "resource-exhausted" || err?.status === 429) {
+      markFirestoreQuotaExceeded();
       consecutiveRateLimitFailures++;
-      const backoffMs = Math.min(30000, 2000 * Math.pow(2, consecutiveRateLimitFailures));
-      console.warn(`[SyncEngine] Rate-limit (429) encountered. Backing off for ${backoffMs}ms`);
-      setTimeout(() => scheduleBatchCoalesce(), backoffMs);
+      console.warn(
+        `[SyncEngine] Firestore quota/rate-limit reached. Safe WAL is preserved locally. System operates seamlessly on Zero-Quota Hub.`
+      );
     } else {
       console.warn("[SyncEngine] Batch sync non-fatal error:", err?.message || err);
     }
@@ -727,8 +738,8 @@ export async function flushCoalescedBatch(forceImmediate = false): Promise<numbe
     isFlushingBatch = false;
   }
 
-  // If there are more items waiting in the queue, schedule next cycle
-  if (memoryWALQueue.length > 0) {
+  // If there are more items waiting in the queue and quota is not active, schedule next cycle
+  if (memoryWALQueue.length > 0 && !isFirestoreQuotaActive()) {
     scheduleBatchCoalesce();
   }
 

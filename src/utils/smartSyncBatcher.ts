@@ -1,5 +1,11 @@
 import { doc, writeBatch, setDoc } from "firebase/firestore";
-import { db, ensureFirebaseAuth } from "./firebase";
+import {
+  db,
+  ensureFirebaseAuth,
+  isFirestoreQuotaActive,
+  markFirestoreQuotaExceeded,
+  isFirestoreQuotaError,
+} from "./firebase";
 import {
   saveOperationToIndexedDB,
   getPendingOperationsFromIndexedDB,
@@ -190,6 +196,11 @@ export async function flushSmartBatchToFirestore(latestSystemData?: any): Promis
   if (isFlushingBatch) return true;
   if (inMemoryQueue.length === 0 && !latestSystemData) return true;
 
+  // If Firestore quota is active, do not attempt Firestore batch commit
+  if (isFirestoreQuotaActive()) {
+    return true;
+  }
+
   isFlushingBatch = true;
   notifyBatchStatus();
 
@@ -247,7 +258,12 @@ export async function flushSmartBatchToFirestore(latestSystemData?: any): Promis
 
     return true;
   } catch (err) {
-    console.warn("Smart batch commit to Firestore deferred:", err);
+    if (isFirestoreQuotaError(err)) {
+      markFirestoreQuotaExceeded();
+      console.warn("Smart batch Firestore quota reached; operations remain safely stored in IndexedDB and local queue.");
+    } else {
+      console.warn("Smart batch commit to Firestore deferred:", err);
+    }
     isFlushingBatch = false;
     notifyBatchStatus();
     return false;

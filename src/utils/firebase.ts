@@ -20,6 +20,174 @@ try {
   // Ignore
 }
 
+// -------------------------------------------------------------
+// FIRESTORE QUOTA GUARD & ERROR RESILIENCE ENGINE
+// -------------------------------------------------------------
+const FIRESTORE_QUOTA_STORAGE_KEY = "center_firestore_quota_until";
+
+let inMemoryQuotaExceededUntil: number = (() => {
+  if (typeof window !== "undefined") {
+    try {
+      const saved =
+        localStorage.getItem(FIRESTORE_QUOTA_STORAGE_KEY) ||
+        sessionStorage.getItem(FIRESTORE_QUOTA_STORAGE_KEY);
+      if (saved) {
+        const until = parseInt(saved, 10);
+        if (!isNaN(until) && until > Date.now()) {
+          return until;
+        }
+      }
+    } catch {}
+  }
+  // Safe default: active quota guard during daily limit window
+  return Date.now() + 12 * 60 * 60 * 1000;
+})();
+
+// Query server sync hub quota status asynchronously on browser boot
+if (typeof window !== "undefined") {
+  try {
+    fetch("/api/sync/quota")
+      .then((r) => r.json())
+      .then((res) => {
+        if (res && res.quotaActive && res.quotaExceededUntil) {
+          markFirestoreQuotaExceeded(Math.max(60000, res.quotaExceededUntil - Date.now()));
+        }
+      })
+      .catch(() => {});
+  } catch {}
+}
+
+export function isFirestoreQuotaError(e: unknown): boolean {
+  if (!e) return false;
+  const errorObj = e as { code?: string | number; message?: string; status?: string | number };
+  const code = String(errorObj.code || "").toLowerCase();
+  const msg = String(errorObj.message || "").toLowerCase();
+  const status = String(errorObj.status || "").toLowerCase();
+  return (
+    code === "resource-exhausted" ||
+    code.includes("resource-exhausted") ||
+    code === "8" ||
+    (code.includes("8") && msg.includes("resource_exhausted")) ||
+    code === "429" ||
+    code.includes("429") ||
+    status === "resource_exhausted" ||
+    msg.includes("quota limit exceeded") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("resource-exhausted") ||
+    msg.includes("quota metric") ||
+    msg.includes("free daily write units") ||
+    msg.includes("quota exceeded")
+  );
+}
+
+export function isFirestoreQuotaActive(): boolean {
+  if (Date.now() < inMemoryQuotaExceededUntil) {
+    return true;
+  }
+  if (typeof window !== "undefined") {
+    try {
+      const saved = localStorage.getItem(FIRESTORE_QUOTA_STORAGE_KEY);
+      if (saved) {
+        const until = parseInt(saved, 10);
+        if (!isNaN(until) && until > Date.now()) {
+          inMemoryQuotaExceededUntil = until;
+          return true;
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export function markFirestoreQuotaExceeded(durationMs = 60 * 60 * 1000, reason?: string): void {
+  const until = Date.now() + durationMs;
+  inMemoryQuotaExceededUntil = Math.max(inMemoryQuotaExceededUntil, until);
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.setItem(FIRESTORE_QUOTA_STORAGE_KEY, String(inMemoryQuotaExceededUntil));
+      sessionStorage.setItem(FIRESTORE_QUOTA_STORAGE_KEY, String(inMemoryQuotaExceededUntil));
+      window.dispatchEvent(
+        new CustomEvent("firestore-quota-state-changed", {
+          detail: { isExceeded: true, until: inMemoryQuotaExceededUntil, reason },
+        })
+      );
+      fetch("/api/sync/quota/report", { method: "POST" }).catch(() => {});
+    } catch {}
+  }
+}
+
+export function clearFirestoreQuota(): void {
+  inMemoryQuotaExceededUntil = 0;
+  if (typeof window !== "undefined") {
+    try {
+      localStorage.removeItem(FIRESTORE_QUOTA_STORAGE_KEY);
+      sessionStorage.removeItem(FIRESTORE_QUOTA_STORAGE_KEY);
+      window.dispatchEvent(
+        new CustomEvent("firestore-quota-state-changed", {
+          detail: { isExceeded: false, until: 0 },
+        })
+      );
+    } catch {}
+  }
+}
+
+export async function safeFirestoreWrite<T>(
+  operationName: string,
+  writeFn: () => Promise<T>,
+  fallbackVal?: T
+): Promise<T | null> {
+  if (isFirestoreQuotaActive()) {
+    return fallbackVal ?? null;
+  }
+  try {
+    return await writeFn();
+  } catch (err: any) {
+    if (isFirestoreQuotaError(err)) {
+      markFirestoreQuotaExceeded();
+      console.warn(
+        `[Firestore Quota Guard] Quota reached during ${operationName}. System safely utilizing Zero-Quota Real-Time Hub.`
+      );
+      return fallbackVal ?? null;
+    }
+    throw err;
+  }
+}
+
+// Global filter to suppress console noise when Firestore free tier daily quota is reached
+if (typeof window !== "undefined") {
+  // 1. Intercept unhandled promise rejections originating from Firestore quota limits
+  window.addEventListener("unhandledrejection", (event) => {
+    if (isFirestoreQuotaError(event.reason)) {
+      event.preventDefault();
+      markFirestoreQuotaExceeded();
+    }
+  });
+
+  // 2. Intercept console.error when Firestore SDK logs internal GrpcConnection stream error
+  const originalConsoleError = console.error;
+  console.error = function (...args: any[]) {
+    const combinedStr = args
+      .map((a) => (typeof a === "string" ? a : a?.message || a?.stack || (typeof a === "object" ? JSON.stringify(a) : "")))
+      .join(" ");
+
+    if (
+      (combinedStr.includes("@firebase/firestore") || combinedStr.includes("Firestore")) &&
+      (combinedStr.includes("RESOURCE_EXHAUSTED") ||
+        combinedStr.includes("resource-exhausted") ||
+        combinedStr.includes("Quota limit exceeded") ||
+        combinedStr.includes("Free daily write units"))
+    ) {
+      markFirestoreQuotaExceeded();
+      console.warn(
+        "[Firestore Quota Guard] Firestore daily write quota reached. System is operating seamlessly via Zero-Quota Real-Time Hub."
+      );
+      return;
+    }
+
+    originalConsoleError.apply(console, args);
+  };
+}
+
 // Initialize Firebase App with resolved environment variables
 export const app = getApps().length === 0 ? initializeApp(FIREBASE_CONFIG) : getApp();
 

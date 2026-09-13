@@ -9,7 +9,12 @@ import {
   WriteBatch,
   Firestore
 } from "firebase/firestore";
-import { db } from "./firebase";
+import {
+  db,
+  isFirestoreQuotaActive,
+  markFirestoreQuotaExceeded,
+  isFirestoreQuotaError,
+} from "./firebase";
 
 // Maximum operations per Firestore writeBatch is 500. We cap at 400 for safety buffer.
 export const MAX_FIRESTORE_BATCH_SIZE = 400;
@@ -62,6 +67,10 @@ export async function executeBatchOperations(
     return { success: true, totalProcessed: 0, errors: [] };
   }
 
+  if (isFirestoreQuotaActive()) {
+    return { success: false, totalProcessed: 0, errors: ["Firestore quota limit reached"] };
+  }
+
   setBulkOperationStatus(true);
   const total = operations.length;
   let processed = 0;
@@ -69,6 +78,8 @@ export async function executeBatchOperations(
 
   try {
     for (let i = 0; i < total; i += MAX_FIRESTORE_BATCH_SIZE) {
+      if (isFirestoreQuotaActive()) break;
+
       const chunk = operations.slice(i, i + MAX_FIRESTORE_BATCH_SIZE);
       const batch: WriteBatch = writeBatch(db);
 
@@ -90,6 +101,11 @@ export async function executeBatchOperations(
           await batch.commit();
           success = true;
         } catch (err: any) {
+          if (isFirestoreQuotaError(err)) {
+            markFirestoreQuotaExceeded();
+            errors.push(err);
+            break;
+          }
           retries--;
           console.warn(`Batch commit warning (retries left: ${retries}):`, err?.message || err);
           if (retries === 0) {
@@ -131,6 +147,10 @@ export async function bulkDeleteCollectionInBatches(
   collectionName: string,
   onProgress?: (deletedCount: number) => void
 ): Promise<{ success: boolean; totalDeleted: number }> {
+  if (isFirestoreQuotaActive()) {
+    return { success: false, totalDeleted: 0 };
+  }
+
   setBulkOperationStatus(true);
   let totalDeleted = 0;
 
@@ -138,6 +158,8 @@ export async function bulkDeleteCollectionInBatches(
     const colRef = collection(db, collectionName);
 
     while (true) {
+      if (isFirestoreQuotaActive()) break;
+
       // Query small pages of documents to delete
       const q = query(colRef, limit(MAX_FIRESTORE_BATCH_SIZE));
       const snapshot = await getDocs(q);
@@ -166,7 +188,11 @@ export async function bulkDeleteCollectionInBatches(
       await new Promise((r) => setTimeout(r, 20));
     }
   } catch (err) {
-    console.error(`Error during bulk delete of collection ${collectionName}:`, err);
+    if (isFirestoreQuotaError(err)) {
+      markFirestoreQuotaExceeded();
+    } else {
+      console.error(`Error during bulk delete of collection ${collectionName}:`, err);
+    }
     return { success: false, totalDeleted };
   } finally {
     setBulkOperationStatus(false);
