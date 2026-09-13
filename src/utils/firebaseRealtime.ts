@@ -4,10 +4,11 @@
  * Provides sub-50ms instant state synchronization between devices across different networks
  */
 
-import { getDatabase, ref, set, onValue, Database } from "firebase/database";
+import { getDatabase, ref, set, remove, onValue, Database } from "firebase/database";
 import { app } from "./firebase";
 import { FIREBASE_CONFIG } from "./envConfig";
 import { LiveScanPayload, GroupFinishedPayload } from "./supabaseClient";
+import { getPersistentDeviceId } from "./deviceClient";
 
 let rtdbInstance: Database | null = null;
 let isRtdbAvailable = true;
@@ -121,6 +122,54 @@ export async function broadcastFirebaseAttendanceStatus(payload: {
     });
   } catch (err: any) {
     console.warn("[Firebase RTDB] Failed to publish attendance status change:", err?.message || err);
+  }
+}
+
+export interface RealtimeDeletionPayload {
+  type: "student" | "payment" | "attendance";
+  barcode: string;
+  monthKey?: string;
+  dateKey?: string;
+  id?: string;
+  timestamp: number;
+  sourceDeviceId?: string;
+  _publishedAt?: number;
+}
+
+/**
+ * Broadcast a real-time record deletion (student, payment, attendance) across Firebase Realtime Database
+ * and immediately update/remove the corresponding node inside Firebase Realtime Database.
+ */
+export async function broadcastFirebaseDeletion(payload: RealtimeDeletionPayload): Promise<void> {
+  const db = getFirebaseRealtimeDb();
+  if (!db) return;
+
+  try {
+    const timestamp = payload.timestamp || Date.now();
+    const sourceDeviceId = payload.sourceDeviceId || getPersistentDeviceId();
+
+    // 1. Publish to latest_deletion stream for instant multi-device event notification
+    const deletionRef = ref(db, "live_events/latest_deletion");
+    await set(deletionRef, {
+      ...payload,
+      timestamp,
+      sourceDeviceId,
+      _publishedAt: Date.now(),
+    });
+
+    // 2. Direct removal of the corresponding node in Firebase Realtime Database
+    if (payload.type === "student") {
+      const studentNode = ref(db, `students_live/${payload.barcode}`);
+      await remove(studentNode);
+    } else if (payload.type === "payment" && payload.monthKey) {
+      const paymentNode = ref(db, `payments_live/${payload.monthKey}_${payload.barcode}`);
+      await remove(paymentNode);
+    } else if (payload.type === "attendance" && payload.dateKey) {
+      const attendanceNode = ref(db, `attendance_live/${payload.dateKey}_${payload.barcode}`);
+      await remove(attendanceNode);
+    }
+  } catch (err: any) {
+    console.warn("[Firebase RTDB] Failed to broadcast deletion:", err?.message || err);
   }
 }
 
@@ -284,6 +333,51 @@ export function subscribeToFirebaseAttendanceStatus(callback: (payload: any) => 
       },
       (error) => {
         console.warn("[Firebase RTDB] Attendance status subscription notice:", error.message);
+      }
+    );
+
+    return () => {
+      try {
+        unsubscribe();
+      } catch {}
+    };
+  } catch {
+    return () => {};
+  }
+}
+
+/**
+ * Active Real-Time Listener on Firebase Realtime Database for deletions.
+ * When a record (student, payment, attendance) is deleted on Device A,
+ * this listener triggers instantly on Device B to remove it from state/DOM without a page refresh.
+ */
+export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletionPayload) => void): () => void {
+  const db = getFirebaseRealtimeDb();
+  if (!db) return () => {};
+
+  try {
+    const deletionRef = ref(db, "live_events/latest_deletion");
+    let isInitialMount = true;
+
+    const unsubscribe = onValue(
+      deletionRef,
+      (snapshot) => {
+        if (!snapshot.exists()) return;
+        const data = snapshot.val() as RealtimeDeletionPayload;
+        if (!data || !data.barcode || !data.type) return;
+
+        if (isInitialMount) {
+          isInitialMount = false;
+          // Ignore events older than 8 seconds on initial mount
+          if (Date.now() - (data._publishedAt || 0) > 8000) {
+            return;
+          }
+        }
+
+        callback(data);
+      },
+      (error) => {
+        console.warn("[Firebase RTDB] Deletion subscription notice:", error.message);
       }
     );
 

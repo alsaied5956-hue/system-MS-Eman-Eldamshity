@@ -724,16 +724,36 @@ export async function savePaymentToSupabase(record: {
     );
 }
 
-/** Delete payment from Supabase */
+/** 
+ * Real Database Deletion: Direct DELETE query against Supabase payments table using primary key id
+ */
 export async function deletePaymentFromSupabase(barcode: string, monthKey: string): Promise<void> {
-  const studentId = await getStudentIdByBarcode(barcode);
+  const b = String(barcode).trim();
+  let studentId = await getStudentIdByBarcode(b);
+  if (!studentId) {
+    const { data: std } = await supabase.from("students").select("id").eq("barcode", b).maybeSingle();
+    studentId = std?.id || null;
+  }
   if (!studentId) return;
 
-  await supabase
+  // 1. Fetch the primary key id of the payment record
+  const { data: pmtRow } = await supabase
     .from("payments")
-    .delete()
+    .select("id")
     .eq("student_id", studentId)
-    .eq("month_key", monthKey);
+    .eq("month_key", monthKey)
+    .maybeSingle();
+
+  // 2. Direct DELETE query using primary key id
+  if (pmtRow?.id) {
+    await supabase.from("payments").delete().eq("id", pmtRow.id);
+  } else {
+    await supabase
+      .from("payments")
+      .delete()
+      .eq("student_id", studentId)
+      .eq("month_key", monthKey);
+  }
 }
 
 /** Save or update exam grade in Supabase */
@@ -842,11 +862,79 @@ export async function saveBulkStudentsToSupabase(students: any[]): Promise<void>
   }
 }
 
-/** Delete student from Supabase */
+/** 
+ * Real Database Deletion: Direct DELETE query executed against Supabase using primary key id
+ * Cascades cleanup to child records (attendance, payments, homework) and removes cache
+ */
 export async function deleteStudentFromSupabase(barcode: string): Promise<void> {
   const b = String(barcode).trim();
   barcodeToIdCache.delete(b);
+
+  // 1. Locate the primary key id in Supabase
+  let studentId: string | null = null;
+  const { data: stdRow } = await supabase
+    .from("students")
+    .select("id")
+    .eq("barcode", b)
+    .maybeSingle();
+
+  if (stdRow?.id) {
+    studentId = stdRow.id;
+  }
+
+  // 2. Direct DELETE query using primary key id
+  if (studentId) {
+    await supabase.from("students").delete().eq("id", studentId);
+    // Direct cascade delete on related child tables by student_id
+    await supabase.from("attendance").delete().eq("student_id", studentId);
+    await supabase.from("payments").delete().eq("student_id", studentId);
+    await supabase.from("homework").delete().eq("student_id", studentId);
+  }
+
+  // 3. Guarantee deletion by barcode as well
   await supabase.from("students").delete().eq("barcode", b);
+  await supabase.from("attendance_logs").delete().eq("barcode", b);
+}
+
+/** 
+ * Real Database Deletion: Direct DELETE query against Supabase attendance table using primary key id
+ */
+export async function deleteAttendanceFromSupabase(barcode: string, dateKey?: string): Promise<void> {
+  const b = String(barcode).trim();
+  const targetDate = dateKey || getTodayDateKey();
+  let studentId = await getStudentIdByBarcode(b);
+  if (!studentId) {
+    const { data: std } = await supabase.from("students").select("id").eq("barcode", b).maybeSingle();
+    studentId = std?.id || null;
+  }
+
+  if (studentId) {
+    // 1. Fetch the primary key id of the attendance record
+    const { data: attRow } = await supabase
+      .from("attendance")
+      .select("id")
+      .eq("student_id", studentId)
+      .eq("session_date", targetDate)
+      .maybeSingle();
+
+    // 2. Direct DELETE query using primary key id
+    if (attRow?.id) {
+      await supabase.from("attendance").delete().eq("id", attRow.id);
+    } else {
+      await supabase
+        .from("attendance")
+        .delete()
+        .eq("student_id", studentId)
+        .eq("session_date", targetDate);
+    }
+  }
+
+  // Also remove from attendance_logs
+  await supabase
+    .from("attendance_logs")
+    .delete()
+    .eq("barcode", b)
+    .eq("date_key", targetDate);
 }
 
 // ------------------------------------------------------------------------
@@ -960,25 +1048,13 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
     }
 
     if (allStudentsRows.length === 0) {
-      try {
-        if (centerBackup && Array.isArray((centerBackup as any).students) && (centerBackup as any).students.length > 0) {
-          console.log("[Supabase] Empty database detected. Auto-populating initial directory to Supabase...");
-          await saveBulkStudentsToSupabase((centerBackup as any).students);
-          const { data: seededRows } = await supabase
-            .from("students")
-            .select("id, barcode, name, phone, parent_phone, grade, group_days, group_time, monthly_fee, notes, is_active, created_at")
-            .eq("is_active", true)
-            .limit(1000);
-          if (Array.isArray(seededRows) && seededRows.length > 0) {
-            allStudentsRows = seededRows;
-          }
-        }
-      } catch (seedErr) {
-        console.warn("[Supabase] Initial seed notice:", seedErr);
-      }
-      if (allStudentsRows.length === 0) {
-        return null;
-      }
+      // Direct fresh pull: If no students in Supabase, return empty array without injecting mock fallback
+      return {
+        students: [],
+        attendanceToday: {},
+        payments: {},
+        count: 0,
+      };
     }
 
     const mappedStudents = allStudentsRows.map((row) => ({

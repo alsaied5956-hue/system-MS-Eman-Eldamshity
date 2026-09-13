@@ -486,11 +486,13 @@ export function loadLocalData(): SystemData {
     const backupToday = seedBackupToday;
     const backupPrices = seedBackupPrices;
 
-    const hasLocalStudents = Array.isArray(parsed.students) && parsed.students.length > 0;
-    const isExplicitlyCleared = Array.isArray(parsed.deletedBarcodes) && parsed.deletedBarcodes.length > 0;
+    const deletedBarcodesList = Array.isArray(parsed.deletedBarcodes) ? parsed.deletedBarcodes : [];
+    const deletedBarcodesSet = new Set(deletedBarcodesList.map((b: string) => String(b).trim()));
+
+    const hasLocalStudents = Array.isArray(parsed.students);
     const finalStudents = hasLocalStudents
-      ? parsed.students
-      : (!isExplicitlyCleared && backupStudents.length > 0 ? backupStudents : backupStudents);
+      ? (parsed.students as Student[]).filter((s) => !deletedBarcodesSet.has(String(s.barcode).trim()))
+      : [];
 
     // Merge users so that admin, alsaied, eman, mahmoud always exist
     const userMap = new Map<string, UserAccount>();

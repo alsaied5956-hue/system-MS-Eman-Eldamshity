@@ -59,6 +59,8 @@ import {
   subscribeToFirebasePayments,
   subscribeToFirebaseGroups,
   subscribeToFirebaseAttendanceStatus,
+  subscribeToFirebaseDeletions,
+  RealtimeDeletionPayload,
 } from "./utils/firebaseRealtime";
 import { getPersistentDeviceId, getPersistentDeviceName } from "./utils/deviceClient";
 import {
@@ -71,6 +73,7 @@ import {
   dualSyncExamGrade,
   dualSyncStudentSave,
   dualSyncStudentDelete,
+  dualSyncAttendanceDelete,
   dualSyncBulkStudents,
 } from "./utils/dualSync";
 import { Navbar } from "./components/Navbar";
@@ -232,17 +235,13 @@ export default function App() {
 
     // 1. Fetch authoritative student directory, today's attendance, and payments from Supabase
     fetchFullDirectoryFromSupabase().then((res) => {
-      if (res && res.students && res.students.length > 0) {
-        setStudents((prev) => {
-          const map = new Map<string, Student>();
-          // Fill with local items first
-          prev.forEach((s) => map.set(String(s.barcode).trim(), s));
-          // Overwrite with authoritative Supabase records
-          res.students.forEach((s) => map.set(String(s.barcode).trim(), s as Student));
-          const unified = Array.from(map.values());
-          appStudentsRef.current = unified;
-          return unified;
-        });
+      if (res && Array.isArray(res.students)) {
+        // Authoritative student list directly from Supabase - no stale cache resurrection
+        const authoritativeList = res.students as Student[];
+        setStudents(authoritativeList);
+        appStudentsRef.current = authoritativeList;
+        // Purge any locally stored deleted students to keep disk cache strictly in sync
+        saveStudentsData(authoritativeList);
 
         if (res.attendanceToday && Object.keys(res.attendanceToday).length > 0) {
           setAttendanceToday((prev) => {
@@ -508,6 +507,7 @@ export default function App() {
           updated[payload.monthKey] = m;
         }
         paymentsRef.current = updated;
+        savePaymentsData(updated);
         return updated;
       });
     };
@@ -521,18 +521,21 @@ export default function App() {
           if (prev.some((s) => s.barcode === payload.barcode)) return prev;
           const next = [payload.studentData, ...prev];
           appStudentsRef.current = next;
+          saveStudentsData(next);
           return next;
         });
       } else if (payload.action === "update" && payload.studentData) {
         setStudents((prev) => {
           const next = prev.map((s) => (s.barcode === payload.barcode ? payload.studentData : s));
           appStudentsRef.current = next;
+          saveStudentsData(next);
           return next;
         });
       } else if (payload.action === "delete") {
         setStudents((prev) => {
           const next = prev.filter((s) => s.barcode !== payload.barcode);
           appStudentsRef.current = next;
+          saveStudentsData(next, payload.barcode);
           return next;
         });
       }
@@ -640,6 +643,82 @@ export default function App() {
       }
     });
 
+    // ⚡ Real-Time Cross-Device Record Deletion Listener (Firebase Realtime Database)
+    // Instantly removes deleted Students, Payments, and Attendance records from DOM/State without page refresh
+    const handleIncomingFirebaseDeletion = (payload: RealtimeDeletionPayload) => {
+      if (payload.sourceDeviceId && payload.sourceDeviceId === currentDevId) return;
+      const b = String(payload.barcode).trim();
+      const dedupeKey = `del_${payload.type}_${b}_${payload.monthKey || ""}_${payload.dateKey || ""}`;
+      if (isRecentlyProcessed(dedupeKey)) return;
+
+      if (payload.type === "student") {
+        setStudents((prev) => {
+          const next = prev.filter((s) => String(s.barcode).trim() !== b);
+          appStudentsRef.current = next;
+          saveStudentsData(next, b);
+          return next;
+        });
+        setAttendanceToday((prev) => {
+          if (!prev[b]) return prev;
+          const next = { ...prev };
+          delete next[b];
+          attendanceTodayRef.current = next;
+          return next;
+        });
+        setScanLogOrder((prev) => prev.filter((code) => code !== b));
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `🗑️ مزامنة فورية: تم حذف الطالب (${b}) من جهاز آخر!`,
+        });
+        setTimeout(() => setSyncBanner(null), 4000);
+      } else if (payload.type === "payment" && payload.monthKey) {
+        setPayments((prev) => {
+          if (!prev[payload.monthKey!] || !prev[payload.monthKey!][b]) return prev;
+          const updated = { ...prev };
+          const m = { ...updated[payload.monthKey!] };
+          delete m[b];
+          updated[payload.monthKey!] = m;
+          paymentsRef.current = updated;
+          savePaymentsData(updated);
+          return updated;
+        });
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `🗑️ مزامنة فورية: تم حذف سداد شهر (${payload.monthKey}) للطالب (${b}) من جهاز آخر!`,
+        });
+        setTimeout(() => setSyncBanner(null), 4000);
+      } else if (payload.type === "attendance") {
+        const dKey = payload.dateKey || getTodayKey();
+        setAttendanceToday((prev) => {
+          if (!prev[b]) return prev;
+          const next = { ...prev };
+          delete next[b];
+          attendanceTodayRef.current = next;
+          return next;
+        });
+        setAttendanceHistory((prev) => {
+          if (!prev[dKey] || !prev[dKey][b]) return prev;
+          const next = { ...prev };
+          const dayMap = { ...next[dKey] };
+          delete dayMap[b];
+          next[dKey] = dayMap;
+          attendanceHistoryRef.current = next;
+          return next;
+        });
+        setScanLogOrder((prev) => prev.filter((code) => code !== b));
+        setSyncBanner({
+          show: true,
+          type: "online-synced",
+          message: `🗑️ مزامنة فورية: تم حذف تسجيل الحضور للطالب (${b}) من جهاز آخر!`,
+        });
+        setTimeout(() => setSyncBanner(null), 4000);
+      }
+    };
+
+    const unsubFbDeletion = subscribeToFirebaseDeletions(handleIncomingFirebaseDeletion);
+
     // ⚡ Multi-Device Diagnostic Ping Responder
     const unsubPing = subscribeToMultiDevicePing((payload) => {
       if (payload.sourceDeviceId && payload.sourceDeviceId !== currentDevId) {
@@ -663,6 +742,7 @@ export default function App() {
       unsubLiveScan();
       unsubFbLiveScan();
       unsubFbAttendanceStatus();
+      unsubFbDeletion();
       unsubPing();
     };
   }, []);

@@ -34,6 +34,7 @@ import {
   saveStudentToSupabase,
   saveBulkStudentsToSupabase,
   deleteStudentFromSupabase,
+  deleteAttendanceFromSupabase,
   getTodayDateKey,
   queueAttendanceScanForBatch,
   flushPendingAttendanceBatchToSupabase,
@@ -43,6 +44,7 @@ import {
   broadcastFirebasePayment,
   broadcastFirebaseGroupFinished,
   broadcastFirebaseAttendanceStatus,
+  broadcastFirebaseDeletion,
 } from "./firebaseRealtime";
 import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./liveEventStream";
 import { recordDeviceEntryExitScan, getPersistentDeviceId } from "./deviceClient";
@@ -637,23 +639,21 @@ export function dualSyncPaymentDelete(params: { barcode: string; monthKey: strin
     "Supabase broadcastPaymentChange (delete)"
   );
 
-  // 1.5️⃣ Firebase Realtime Database Payment Delete Broadcast
+  // 2️⃣ Real Database Deletion: Direct Supabase DELETE by primary key id, immediately followed by Firebase RTDB node removal & broadcast
   runInBackground(
-    broadcastFirebasePayment({
-      action: "delete",
-      barcode: b,
-      monthKey: params.monthKey,
-      amount: 0,
-      timestamp: Date.now(),
-      sourceDeviceId: getPersistentDeviceId(),
-    }),
-    "Firebase RTDB broadcastFirebasePayment (delete)"
-  );
+    (async () => {
+      await deletePaymentFromSupabase(b, params.monthKey);
 
-  // 2️⃣ Supabase Postgres
-  runInBackground(
-    deletePaymentFromSupabase(b, params.monthKey),
-    "Supabase deletePaymentFromSupabase"
+      // Immediately after successful Supabase deletion, remove node & broadcast in Firebase Realtime Database
+      await broadcastFirebaseDeletion({
+        type: "payment",
+        barcode: b,
+        monthKey: params.monthKey,
+        timestamp: Date.now(),
+        sourceDeviceId: getPersistentDeviceId(),
+      });
+    })(),
+    "Supabase & Firebase RTDB delete payment"
   );
 
   // 3️⃣ Firebase Firestore
@@ -813,10 +813,20 @@ export function dualSyncStudentDelete(barcode: string) {
     "Supabase broadcastStudentChange (delete)"
   );
 
-  // 2️⃣ Supabase Postgres
+  // 2️⃣ Real Database Deletion: Direct Supabase DELETE by primary key id, immediately followed by Firebase RTDB node removal & broadcast
   runInBackground(
-    deleteStudentFromSupabase(b),
-    "Supabase deleteStudentFromSupabase"
+    (async () => {
+      await deleteStudentFromSupabase(b);
+
+      // Immediately after successful Supabase deletion, remove node & broadcast in Firebase Realtime Database
+      await broadcastFirebaseDeletion({
+        type: "student",
+        barcode: b,
+        timestamp: Date.now(),
+        sourceDeviceId: getPersistentDeviceId(),
+      });
+    })(),
+    "Supabase & Firebase RTDB delete student"
   );
 
   // 3️⃣ Firebase Firestore
@@ -827,6 +837,38 @@ export function dualSyncStudentDelete(barcode: string) {
       await deleteDoc(ref);
     })(),
     "Firebase delete student doc"
+  );
+}
+
+export function dualSyncAttendanceDelete(barcode: string, dateKey?: string) {
+  const b = String(barcode).trim();
+  const dKey = dateKey || getTodayDateKey();
+
+  // 1️⃣ Real Database Deletion: Direct Supabase DELETE by primary key id, immediately followed by Firebase RTDB node removal & broadcast
+  runInBackground(
+    (async () => {
+      await deleteAttendanceFromSupabase(b, dKey);
+
+      // Immediately after successful Supabase deletion, remove node & broadcast in Firebase Realtime Database
+      await broadcastFirebaseDeletion({
+        type: "attendance",
+        barcode: b,
+        dateKey: dKey,
+        timestamp: Date.now(),
+        sourceDeviceId: getPersistentDeviceId(),
+      });
+    })(),
+    "Supabase & Firebase RTDB delete attendance"
+  );
+
+  // 2️⃣ Firebase Firestore
+  runInBackground(
+    (async () => {
+      await ensureFirebaseAuth();
+      const ref = doc(db, "attendance_records", `${dKey}_${b}`);
+      await deleteDoc(ref);
+    })(),
+    "Firebase delete attendance doc"
   );
 }
 
