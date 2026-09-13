@@ -101,10 +101,13 @@ import { pushLiveAttendanceEvent, pushLiveAttendanceBatch } from "./utils/liveEv
 import { CheckCircle2, WifiOff, RefreshCw, X, MessageSquare, Send } from "lucide-react";
 
 export default function App() {
+  // Strict Session-Only Authentication Persistence (Force Re-login on App Restart)
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(() => {
     if (typeof window !== "undefined") {
       try {
-        const saved = localStorage.getItem("center_current_user");
+        // Clean any legacy persistent keys from localStorage
+        localStorage.removeItem("center_current_user");
+        const saved = sessionStorage.getItem("center_current_user");
         if (saved) {
           const u = JSON.parse(saved);
           if (u && u.username) return u;
@@ -1388,7 +1391,8 @@ export default function App() {
           onLoginSuccess={(user) => {
             setCurrentUser(user);
             try {
-              localStorage.setItem("center_current_user", JSON.stringify(user));
+              sessionStorage.setItem("center_current_user", JSON.stringify(user));
+              localStorage.removeItem("center_current_user");
             } catch {}
           }}
         />
@@ -1417,6 +1421,7 @@ export default function App() {
             onLogout={() => {
               setCurrentUser(null);
               try {
+                sessionStorage.removeItem("center_current_user");
                 localStorage.removeItem("center_current_user");
               } catch {}
             }}
