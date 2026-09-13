@@ -2579,6 +2579,27 @@ if (typeof window !== "undefined") {
               window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
             }
           }
+        } else if (payload?.type === "record_deleted" && payload?.barcode) {
+          const current = loadLocalData();
+          const bc = String(payload.barcode).trim();
+          if (payload.recordType === "student") {
+            const nextStudents = (current.students || []).filter((s) => String(s.barcode).trim() !== bc);
+            saveStudentsData(nextStudents, bc);
+          } else if (payload.recordType === "payment" && payload.monthKey) {
+            const updatedPay = { ...(current.payments || {}) };
+            if (updatedPay[payload.monthKey] && updatedPay[payload.monthKey][bc]) {
+              const m = { ...updatedPay[payload.monthKey] };
+              delete m[bc];
+              updatedPay[payload.monthKey] = m;
+              savePaymentsData(updatedPay, `${payload.monthKey}_${bc}`);
+            }
+          } else if (payload.recordType === "attendance") {
+            const dKey = payload.dateKey || getTodayKey();
+            saveAttendanceDeletedKey(bc, dKey);
+          }
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("realtime-record-deleted", { detail: payload }));
+          }
         }
       } catch {}
     };

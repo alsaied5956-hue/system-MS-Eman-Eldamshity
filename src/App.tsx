@@ -15,6 +15,7 @@ import {
   saveAttendanceTodayData,
   saveAttendanceAndStudentsBatch,
   saveAttendanceHistoryData,
+  saveAttendanceDeletedKey,
   saveClearSessionScansForGrade,
   saveScanLogData,
   savePaymentsData,
@@ -680,7 +681,7 @@ export default function App() {
           delete m[b];
           updated[payload.monthKey!] = m;
           paymentsRef.current = updated;
-          savePaymentsData(updated);
+          savePaymentsData(updated, `${payload.monthKey}_${b}`);
           return updated;
         });
         setSyncBanner({
@@ -708,6 +709,7 @@ export default function App() {
           return next;
         });
         setScanLogOrder((prev) => prev.filter((code) => code !== b));
+        saveAttendanceDeletedKey(b, dKey);
         setSyncBanner({
           show: true,
           type: "online-synced",
@@ -718,6 +720,26 @@ export default function App() {
     };
 
     const unsubFbDeletion = subscribeToFirebaseDeletions(handleIncomingFirebaseDeletion);
+
+    // ⚡ Local & SSE Record Deletion Bridge
+    const onRealtimeRecordDeleted = (e: Event) => {
+      const customEvent = e as CustomEvent<any>;
+      if (customEvent.detail) {
+        const d = customEvent.detail;
+        handleIncomingFirebaseDeletion({
+          type: (d.recordType || d.type) as any,
+          barcode: d.barcode,
+          monthKey: d.monthKey,
+          dateKey: d.dateKey,
+          id: d.id,
+          sourceDeviceId: d.sourceDeviceId,
+          timestamp: d.timestamp || Date.now(),
+        });
+      }
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("realtime-record-deleted", onRealtimeRecordDeleted);
+    }
 
     // ⚡ Multi-Device Diagnostic Ping Responder
     const unsubPing = subscribeToMultiDevicePing((payload) => {
@@ -733,6 +755,9 @@ export default function App() {
     });
 
     return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("realtime-record-deleted", onRealtimeRecordDeleted);
+      }
       unsubGroup();
       unsubFbGroup();
       unsubPayment();
@@ -1080,12 +1105,28 @@ export default function App() {
 
   // Handler: Delete Single Student
   const handleDeleteStudent = useCallback((barcode: string) => {
+    const student = students.find((s) => s.barcode === barcode);
     const updated = students.filter((s) => s.barcode !== barcode);
     setStudents(updated);
     saveStudentsData(updated, barcode);
 
+    // Clean up local scans and today's attendance for the deleted student
+    setAttendanceToday((prev) => {
+      if (!prev[barcode]) return prev;
+      const next = { ...prev };
+      delete next[barcode];
+      return next;
+    });
+    setScanLogOrder((prev) => prev.filter((b) => b !== barcode));
+    setScanLogTimes((prev) => {
+      if (!prev[barcode]) return prev;
+      const next = { ...prev };
+      delete next[barcode];
+      return next;
+    });
+
     // ⚡ Dual-Sync Delete Student from Supabase & Firebase
-    dualSyncStudentDelete(barcode);
+    dualSyncStudentDelete(barcode, student?.id);
   }, [students]);
 
   // Handler: Clear All Data
@@ -1269,18 +1310,21 @@ export default function App() {
   const handleDeletePayment = useCallback((monthKey: string, barcode: string) => {
     if (!payments[monthKey]?.[barcode]) return;
 
+    const paymentRecord = payments[monthKey][barcode];
     const updatedPayments = { ...payments };
     const monthMap = { ...updatedPayments[monthKey] };
     delete monthMap[barcode];
     updatedPayments[monthKey] = monthMap;
 
+    const paymentKey = `${monthKey}_${String(barcode).trim()}`;
     setPayments(updatedPayments);
-    savePaymentsData(updatedPayments);
+    savePaymentsData(updatedPayments, paymentKey);
 
     // ⚡ Dual-Sync Payment Deletion from Firebase and Supabase
     dualSyncPaymentDelete({
       barcode,
       monthKey,
+      paymentId: paymentRecord?.id,
     });
   }, [payments]);
 

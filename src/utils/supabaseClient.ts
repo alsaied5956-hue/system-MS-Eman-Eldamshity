@@ -727,7 +727,7 @@ export async function savePaymentToSupabase(record: {
 /** 
  * Real Database Deletion: Direct DELETE query against Supabase payments table using primary key id
  */
-export async function deletePaymentFromSupabase(barcode: string, monthKey: string, paymentIdParam?: string): Promise<void> {
+export async function deletePaymentFromSupabase(barcode: string, monthKey: string, paymentIdParam?: string | number): Promise<void> {
   const b = String(barcode).trim();
   let studentId = await getStudentIdByBarcode(b);
   if (!studentId) {
@@ -737,7 +737,7 @@ export async function deletePaymentFromSupabase(barcode: string, monthKey: strin
 
   // 1. Direct DELETE query using primary key id if provided
   if (paymentIdParam) {
-    await supabase.from("payments").delete().eq("id", paymentIdParam);
+    await supabase.from("payments").delete().eq("id", String(paymentIdParam));
   } else if (studentId) {
     // Locate the primary key id of the payment record
     const { data: pmtRow } = await supabase
@@ -872,12 +872,12 @@ export async function saveBulkStudentsToSupabase(students: any[]): Promise<void>
  * Real Database Deletion: Direct DELETE query executed against Supabase using primary key id
  * Cascades cleanup to child records (attendance, payments, homework) and removes cache
  */
-export async function deleteStudentFromSupabase(barcode: string, studentIdParam?: string): Promise<void> {
+export async function deleteStudentFromSupabase(barcode: string, studentIdParam?: string | number): Promise<void> {
   const b = String(barcode).trim();
   barcodeToIdCache.delete(b);
 
   // 1. Locate the primary key id in Supabase
-  let studentId: string | null = studentIdParam || null;
+  let studentId: string | null = studentIdParam ? String(studentIdParam) : null;
   if (!studentId) {
     const { data: stdRow } = await supabase
       .from("students")
@@ -908,7 +908,7 @@ export async function deleteStudentFromSupabase(barcode: string, studentIdParam?
 /** 
  * Real Database Deletion: Direct DELETE query against Supabase attendance table using primary key id
  */
-export async function deleteAttendanceFromSupabase(barcode: string, dateKey?: string, attendanceIdParam?: string): Promise<void> {
+export async function deleteAttendanceFromSupabase(barcode: string, dateKey?: string, attendanceIdParam?: string | number): Promise<void> {
   const b = String(barcode).trim();
   const targetDate = dateKey || getTodayDateKey();
   let studentId = await getStudentIdByBarcode(b);
@@ -919,18 +919,32 @@ export async function deleteAttendanceFromSupabase(barcode: string, dateKey?: st
 
   // 1. Direct DELETE query using primary key id if provided
   if (attendanceIdParam) {
-    await supabase.from("attendance").delete().eq("id", attendanceIdParam);
-  } else if (studentId) {
-    // Fetch the primary key id of the attendance record
-    const { data: attRow } = await supabase
-      .from("attendance")
-      .select("id")
-      .eq("student_id", studentId)
-      .eq("session_date", targetDate)
-      .maybeSingle();
+    await supabase.from("attendance").delete().eq("id", String(attendanceIdParam));
+    await supabase.from("attendance_logs").delete().eq("id", String(attendanceIdParam));
+  } else {
+    // Locate primary key id in attendance_logs
+    let logQuery = supabase.from("attendance_logs").select("id").eq("date_key", targetDate);
+    if (studentId) {
+      logQuery = logQuery.eq("student_id", studentId);
+    } else {
+      logQuery = logQuery.eq("barcode", b);
+    }
+    const { data: logRow } = await logQuery.maybeSingle();
+    if (logRow?.id) {
+      await supabase.from("attendance_logs").delete().eq("id", logRow.id);
+    }
 
-    if (attRow?.id) {
-      await supabase.from("attendance").delete().eq("id", attRow.id);
+    if (studentId) {
+      const { data: attRow } = await supabase
+        .from("attendance")
+        .select("id")
+        .eq("student_id", studentId)
+        .eq("session_date", targetDate)
+        .maybeSingle();
+
+      if (attRow?.id) {
+        await supabase.from("attendance").delete().eq("id", attRow.id);
+      }
     }
   }
 
@@ -940,9 +954,14 @@ export async function deleteAttendanceFromSupabase(barcode: string, dateKey?: st
       .delete()
       .eq("student_id", studentId)
       .eq("session_date", targetDate);
+    await supabase
+      .from("attendance_logs")
+      .delete()
+      .eq("student_id", studentId)
+      .eq("date_key", targetDate);
   }
 
-  // Also remove from attendance_logs
+  // Also remove from attendance_logs by barcode and date_key
   await supabase
     .from("attendance_logs")
     .delete()
@@ -1111,7 +1130,7 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
     const paymentsMap: Record<string, Record<string, any>> = {};
     const { data: payRows, error: payErr } = await supabase
       .from("payments")
-      .select("month_key, amount_paid, payment_date, notes, received_by, students(barcode)");
+      .select("id, month_key, amount_paid, payment_date, notes, received_by, students(barcode)");
 
     if (!payErr && Array.isArray(payRows)) {
       payRows.forEach((p) => {
@@ -1120,6 +1139,7 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
         if (barcode && mKey) {
           if (!paymentsMap[mKey]) paymentsMap[mKey] = {};
           paymentsMap[mKey][barcode] = {
+            id: p.id,
             barcode,
             month: mKey,
             monthKey: mKey,

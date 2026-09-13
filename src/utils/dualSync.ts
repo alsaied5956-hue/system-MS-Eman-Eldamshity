@@ -637,7 +637,7 @@ export function dualSyncPaymentDelete(params: { barcode: string; monthKey: strin
 
   // 0️⃣ Durable Tombstone to prevent Zombie Resurrection
   runInBackground(
-    recordTombstone("PAYMENT", `${b}_${params.monthKey}`, "admin", "User deleted payment"),
+    recordTombstone("FINANCIAL_LEDGER", `${b}_${params.monthKey}`, "admin", "User deleted payment"),
     "Record payment tombstone"
   );
 
@@ -667,9 +667,22 @@ export function dualSyncPaymentDelete(params: { barcode: string; monthKey: strin
         type: "payment",
         barcode: b,
         monthKey: params.monthKey,
+        id: params.paymentId ? String(params.paymentId) : undefined,
         timestamp: Date.now(),
         sourceDeviceId: getPersistentDeviceId(),
       });
+
+      // Also evict from Server Sync Hub state and disk cache
+      fetch("/api/sync/delete-payment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          barcode: b,
+          monthKey: params.monthKey,
+          paymentId: params.paymentId,
+          sourceDeviceId: getPersistentDeviceId(),
+        }),
+      }).catch(() => {});
     })(),
     "Supabase & Firebase RTDB delete payment"
   );
@@ -831,6 +844,17 @@ export function dualSyncStudentDelete(barcode: string, studentId?: string | numb
         timestamp: Date.now(),
         sourceDeviceId: getPersistentDeviceId(),
       });
+
+      // Also evict from Server Sync Hub state and disk cache
+      fetch("/api/sync/delete-student", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          barcode: b,
+          studentId,
+          sourceDeviceId: getPersistentDeviceId(),
+        }),
+      }).catch(() => {});
     })(),
     "Supabase & Firebase RTDB delete student"
   );
@@ -865,6 +889,18 @@ export function dualSyncAttendanceDelete(barcode: string, dateKey?: string, atte
         timestamp: Date.now(),
         sourceDeviceId: getPersistentDeviceId(),
       });
+
+      // Also evict from Server Sync Hub state and disk cache
+      fetch("/api/sync/delete-attendance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          barcode: b,
+          dateKey: dKey,
+          attendanceId,
+          sourceDeviceId: getPersistentDeviceId(),
+        }),
+      }).catch(() => {});
     })(),
     "Supabase & Firebase RTDB delete attendance"
   );

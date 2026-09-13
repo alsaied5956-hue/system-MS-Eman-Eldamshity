@@ -241,12 +241,24 @@ try {
   if (fs.existsSync(SYNC_STATE_FILE)) {
     const raw = fs.readFileSync(SYNC_STATE_FILE, "utf-8");
     cachedServerState = JSON.parse(raw);
-    console.log("[Sync Hub] Loaded persistent center state from disk");
+    // Filter out any previously deleted barcodes to prevent resurrection
+    const deletedBarcodesSet = new Set(
+      (cachedServerState?.deletedBarcodes || []).map((b: string) => String(b).trim())
+    );
+    if (cachedServerState?.students && Array.isArray(cachedServerState.students)) {
+      cachedServerState.students = cachedServerState.students.filter(
+        (s: any) => !deletedBarcodesSet.has(String(s.barcode).trim())
+      );
+    }
+    console.log("[Sync Hub] Loaded persistent center state from disk (sanitized)");
   } else if (fs.existsSync(BACKUP_FALLBACK_FILE)) {
     const raw = fs.readFileSync(BACKUP_FALLBACK_FILE, "utf-8");
     cachedServerState = JSON.parse(raw);
-    fs.writeFileSync(SYNC_STATE_FILE, raw, "utf-8");
-    console.log("[Sync Hub] Initialized center state from backup template");
+    // CRITICAL: Never seed fallback mock students into server memory
+    // Authoritative student list must always be pulled fresh from Supabase
+    cachedServerState.students = [];
+    fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(cachedServerState), "utf-8");
+    console.log("[Sync Hub] Initialized center state template with zero mock students");
   }
 } catch (e) {
   console.warn("[Sync Hub] State initialization note:", e);
@@ -563,6 +575,52 @@ async function startServer() {
       };
     }
 
+    // Merge tombstones and sanitize stateToSave so deleted records never resurrect
+    const allDeletedBarcodes = Array.from(
+      new Set([
+        ...(cachedServerState?.deletedBarcodes || []),
+        ...(data?.deletedBarcodes || []),
+      ])
+    ).map((b) => String(b).trim());
+    const deletedBarcodesSet = new Set(allDeletedBarcodes);
+
+    const allDeletedPaymentKeys = Array.from(
+      new Set([
+        ...(cachedServerState?.deletedPaymentKeys || []),
+        ...(data?.deletedPaymentKeys || []),
+      ])
+    ).map((k) => String(k).trim());
+    const deletedPaymentKeysSet = new Set(allDeletedPaymentKeys);
+
+    const allDeletedAttendanceKeys = Array.from(
+      new Set([
+        ...(cachedServerState?.deletedAttendanceKeys || []),
+        ...(data?.deletedAttendanceKeys || []),
+      ])
+    ).map((k) => String(k).trim());
+    const deletedAttendanceKeysSet = new Set(allDeletedAttendanceKeys);
+
+    if (Array.isArray(stateToSave.students)) {
+      stateToSave.students = stateToSave.students.filter(
+        (s: any) => !deletedBarcodesSet.has(String(s.barcode).trim())
+      );
+    }
+
+    if (stateToSave.attendanceToday && typeof stateToSave.attendanceToday === "object") {
+      const filteredToday: Record<string, string> = {};
+      for (const [b, st] of Object.entries(stateToSave.attendanceToday)) {
+        const cleanB = String(b).trim();
+        if (!deletedBarcodesSet.has(cleanB) && !deletedAttendanceKeysSet.has(`today_${cleanB}`)) {
+          filteredToday[cleanB] = st as string;
+        }
+      }
+      stateToSave.attendanceToday = filteredToday;
+    }
+
+    stateToSave.deletedBarcodes = allDeletedBarcodes;
+    stateToSave.deletedPaymentKeys = allDeletedPaymentKeys;
+    stateToSave.deletedAttendanceKeys = allDeletedAttendanceKeys;
+
     cachedServerState = stateToSave;
     lastServerUpdate = Date.now();
 
@@ -622,6 +680,174 @@ async function startServer() {
       broadcastedToClients: sseSubscribers.size,
       firestoreQuotaActive: isServerFirestoreQuotaActive(),
     });
+  });
+
+  // 4b. Immediate Server-Side Student Record Deletion with SSE Broadcasting
+  app.post("/api/sync/delete-student", (req: Request, res: Response) => {
+    const { barcode, studentId, sourceDeviceId } = req.body;
+    if (!barcode) {
+      return res.status(400).json({ ok: false, error: "Missing barcode" });
+    }
+    const b = String(barcode).trim();
+
+    if (cachedServerState && typeof cachedServerState === "object") {
+      const deletedBarcodes = Array.from(
+        new Set([...(cachedServerState.deletedBarcodes || []), b])
+      );
+      const filteredStudents = Array.isArray(cachedServerState.students)
+        ? cachedServerState.students.filter((s: any) => String(s.barcode).trim() !== b)
+        : [];
+
+      const filteredToday = { ...(cachedServerState.attendanceToday || {}) };
+      delete filteredToday[b];
+
+      const filteredScanOrder = Array.isArray(cachedServerState.scanLogOrder)
+        ? cachedServerState.scanLogOrder.filter((code: string) => code !== b)
+        : [];
+
+      const filteredScanTimes = { ...(cachedServerState.scanLogTimes || {}) };
+      delete filteredScanTimes[b];
+
+      cachedServerState = {
+        ...cachedServerState,
+        students: filteredStudents,
+        attendanceToday: filteredToday,
+        scanLogOrder: filteredScanOrder,
+        scanLogTimes: filteredScanTimes,
+        deletedBarcodes,
+        updatedAt: Date.now(),
+      };
+      lastServerUpdate = Date.now();
+
+      try {
+        fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(cachedServerState), "utf-8");
+      } catch (err) {
+        console.error("[Sync Hub] Failed to persist student deletion to disk:", err);
+      }
+    }
+
+    // Broadcast immediate SSE deletion to all connected clients
+    broadcastToUnified({
+      type: "record_deleted",
+      recordType: "student",
+      barcode: b,
+      studentId,
+      sourceDeviceId: sourceDeviceId || "server",
+      timestamp: Date.now(),
+    });
+
+    res.json({ ok: true, deletedBarcode: b });
+  });
+
+  // 4c. Immediate Server-Side Payment Record Deletion with SSE Broadcasting
+  app.post("/api/sync/delete-payment", (req: Request, res: Response) => {
+    const { barcode, monthKey, paymentId, sourceDeviceId } = req.body;
+    if (!barcode || !monthKey) {
+      return res.status(400).json({ ok: false, error: "Missing barcode or monthKey" });
+    }
+    const b = String(barcode).trim();
+    const m = String(monthKey).trim();
+    const payKey = `${m}_${b}`;
+
+    if (cachedServerState && typeof cachedServerState === "object") {
+      const deletedPaymentKeys = Array.from(
+        new Set([...(cachedServerState.deletedPaymentKeys || []), payKey])
+      );
+
+      const payments = { ...(cachedServerState.payments || {}) };
+      if (payments[m] && payments[m][b]) {
+        const monthMap = { ...payments[m] };
+        delete monthMap[b];
+        payments[m] = monthMap;
+      }
+
+      cachedServerState = {
+        ...cachedServerState,
+        payments,
+        deletedPaymentKeys,
+        updatedAt: Date.now(),
+      };
+      lastServerUpdate = Date.now();
+
+      try {
+        fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(cachedServerState), "utf-8");
+      } catch (err) {
+        console.error("[Sync Hub] Failed to persist payment deletion to disk:", err);
+      }
+    }
+
+    // Broadcast immediate SSE deletion to all connected clients
+    broadcastToUnified({
+      type: "record_deleted",
+      recordType: "payment",
+      barcode: b,
+      monthKey: m,
+      paymentId,
+      sourceDeviceId: sourceDeviceId || "server",
+      timestamp: Date.now(),
+    });
+
+    res.json({ ok: true, deletedPaymentKey: payKey });
+  });
+
+  // 4d. Immediate Server-Side Attendance Record Deletion with SSE Broadcasting
+  app.post("/api/sync/delete-attendance", (req: Request, res: Response) => {
+    const { barcode, dateKey, attendanceId, sourceDeviceId } = req.body;
+    if (!barcode) {
+      return res.status(400).json({ ok: false, error: "Missing barcode" });
+    }
+    const b = String(barcode).trim();
+    const d = dateKey ? String(dateKey).trim() : new Date().toISOString().slice(0, 10);
+    const attKey = `${d}_${b}`;
+
+    if (cachedServerState && typeof cachedServerState === "object") {
+      const deletedAttendanceKeys = Array.from(
+        new Set([...(cachedServerState.deletedAttendanceKeys || []), attKey])
+      );
+
+      const filteredToday = { ...(cachedServerState.attendanceToday || {}) };
+      delete filteredToday[b];
+
+      const history = { ...(cachedServerState.attendanceHistory || {}) };
+      if (history[d] && history[d][b]) {
+        const dayMap = { ...history[d] };
+        delete dayMap[b];
+        history[d] = dayMap;
+      }
+
+      const filteredScanOrder = Array.isArray(cachedServerState.scanLogOrder)
+        ? cachedServerState.scanLogOrder.filter((code: string) => code !== b)
+        : [];
+
+      cachedServerState = {
+        ...cachedServerState,
+        attendanceToday: filteredToday,
+        attendanceHistory: history,
+        scanLogOrder: filteredScanOrder,
+        deletedAttendanceKeys,
+        updatedAt: Date.now(),
+      };
+      lastServerUpdate = Date.now();
+
+      try {
+        fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(cachedServerState), "utf-8");
+      } catch (err) {
+        console.error("[Sync Hub] Failed to persist attendance deletion to disk:", err);
+      }
+    }
+
+    // Broadcast immediate SSE deletion to all connected clients
+    broadcastToUnified({
+      type: "record_deleted",
+      recordType: "attendance",
+      barcode: b,
+      dateKey: d,
+      attendanceId,
+      sourceDeviceId: sourceDeviceId || "server",
+      timestamp: Date.now(),
+    });
+
+    res.json({ ok: true, deletedAttendanceKey: attKey });
   });
 
   // Query or report Firestore Quota state

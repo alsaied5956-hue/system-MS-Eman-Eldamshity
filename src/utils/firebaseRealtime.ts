@@ -4,7 +4,7 @@
  * Provides sub-50ms instant state synchronization between devices across different networks
  */
 
-import { getDatabase, ref, set, remove, onValue, onChildRemoved, Database } from "firebase/database";
+import { getDatabase, ref, set, remove, onValue, onChildRemoved, onChildAdded, push, Database } from "firebase/database";
 import { app } from "./firebase";
 import { FIREBASE_CONFIG } from "./envConfig";
 import { LiveScanPayload, GroupFinishedPayload } from "./supabaseClient";
@@ -147,27 +147,55 @@ export async function broadcastFirebaseDeletion(payload: RealtimeDeletionPayload
   try {
     const timestamp = payload.timestamp || Date.now();
     const sourceDeviceId = payload.sourceDeviceId || getPersistentDeviceId();
+    const b = String(payload.barcode).trim();
 
     // 1. Direct removal of the corresponding node in Firebase Realtime Database
     if (payload.type === "student") {
-      const studentNode = ref(db, `students_live/${payload.barcode}`);
-      await remove(studentNode);
+      const studentNode = ref(db, `students_live/${b}`);
+      await remove(studentNode).catch(() => {});
     } else if (payload.type === "payment" && payload.monthKey) {
-      const paymentNode = ref(db, `payments_live/${payload.monthKey}_${payload.barcode}`);
-      await remove(paymentNode);
+      const paymentNode = ref(db, `payments_live/${payload.monthKey}_${b}`);
+      await remove(paymentNode).catch(() => {});
     } else if (payload.type === "attendance" && payload.dateKey) {
-      const attendanceNode = ref(db, `attendance_live/${payload.dateKey}_${payload.barcode}`);
-      await remove(attendanceNode);
+      const attendanceNode = ref(db, `attendance_live/${payload.dateKey}_${b}`);
+      await remove(attendanceNode).catch(() => {});
     }
 
-    // 2. Publish to latest_deletion stream for instant multi-device event notification
+    // 2. Write to persistent deleted_records node so newly connecting devices instantly know about it
+    const delKey =
+      payload.type === "payment"
+        ? `payment_${payload.monthKey}_${b}`
+        : payload.type === "attendance"
+        ? `attendance_${payload.dateKey}_${b}`
+        : `student_${b}`;
+    await set(ref(db, `deleted_records/${delKey}`), {
+      ...payload,
+      barcode: b,
+      timestamp,
+      sourceDeviceId,
+      _publishedAt: Date.now(),
+    }).catch(() => {});
+
+    // 3. Publish to latest_deletion stream for instant multi-device event notification (onValue)
     const deletionRef = ref(db, "live_events/latest_deletion");
     await set(deletionRef, {
       ...payload,
+      barcode: b,
       timestamp,
       sourceDeviceId,
       _publishedAt: Date.now(),
     });
+
+    // 4. Push to deletion_stream for reliable sequence broadcasting (onChildAdded)
+    const streamRef = ref(db, "live_events/deletion_stream");
+    const itemRef = push(streamRef);
+    await set(itemRef, {
+      ...payload,
+      barcode: b,
+      timestamp,
+      sourceDeviceId,
+      _publishedAt: Date.now(),
+    }).catch(() => {});
   } catch (err: any) {
     console.warn("[Firebase RTDB] Failed to broadcast deletion:", err?.message || err);
   }
@@ -410,7 +438,6 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
   try {
     // 1. Active listener on live_events/latest_deletion (onValue)
     const deletionRef = ref(db, "live_events/latest_deletion");
-    let isInitialMount = true;
 
     const unsubLatest = onValue(
       deletionRef,
@@ -418,14 +445,6 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
         if (!snapshot.exists()) return;
         const data = snapshot.val() as RealtimeDeletionPayload;
         if (!data || !data.barcode || !data.type) return;
-
-        if (isInitialMount) {
-          isInitialMount = false;
-          // Ignore events older than 12 seconds on initial mount
-          if (Date.now() - (data._publishedAt || 0) > 12000) {
-            return;
-          }
-        }
 
         callback(data);
       },
@@ -436,6 +455,28 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
     unsubs.push(() => {
       try {
         unsubLatest();
+      } catch {}
+    });
+
+    // 2. Active sequential stream listener on live_events/deletion_stream (onChildAdded)
+    // Ensures zero dropped events even during burst deletions
+    const streamRef = ref(db, "live_events/deletion_stream");
+    const unsubStream = onChildAdded(
+      streamRef,
+      (snapshot) => {
+        if (!snapshot.exists()) return;
+        const data = snapshot.val() as RealtimeDeletionPayload;
+        if (!data || !data.barcode || !data.type) return;
+
+        callback(data);
+      },
+      (error) => {
+        console.warn("[Firebase RTDB] Deletion stream notice:", error.message);
+      }
+    );
+    unsubs.push(() => {
+      try {
+        unsubStream();
       } catch {}
     });
 
