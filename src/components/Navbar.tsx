@@ -47,6 +47,7 @@ interface NavbarProps {
   onOpenPrintAllPDF?: () => void;
   isSidebarOpen?: boolean;
   onToggleSidebar?: () => void;
+  realtimeStatus?: { status: string; connectedPeersCount: number };
 }
 
 export const Navbar: React.FC<NavbarProps> = React.memo(({
@@ -72,6 +73,7 @@ export const Navbar: React.FC<NavbarProps> = React.memo(({
   onOpenPrintAllPDF,
   isSidebarOpen = true,
   onToggleSidebar,
+  realtimeStatus,
 }) => {
   return (
     <header className="no-print bg-[#070c1e] border-b border-indigo-500/15 px-4 md:px-8 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-30 shadow-2xl">
@@ -195,6 +197,33 @@ export const Navbar: React.FC<NavbarProps> = React.memo(({
 
         {/* Live Cloud Status Indicator with Sync Button */}
         <div className="flex items-center gap-1.5">
+          {realtimeStatus && (
+            <div
+              className={`hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-2xl border text-xs font-bold shadow-inner ${
+                realtimeStatus.status === "SUBSCRIBED"
+                  ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
+                  : "bg-amber-950/60 border-amber-500/40 text-amber-300"
+              }`}
+              title="محرك المزامنة اللحظي الشامل (Supabase Postgres CDC)"
+            >
+              <span className="relative flex h-2 w-2">
+                {realtimeStatus.status === "SUBSCRIBED" && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                )}
+                <span
+                  className={`relative inline-flex rounded-full h-2 w-2 ${
+                    realtimeStatus.status === "SUBSCRIBED" ? "bg-emerald-500" : "bg-amber-500"
+                  }`}
+                ></span>
+              </span>
+              <span className="font-tajawal text-[11px]">
+                {realtimeStatus.status === "SUBSCRIBED"
+                  ? `Supabase CDC (${realtimeStatus.connectedPeersCount} متصل)`
+                  : "ربط CDC..."}
+              </span>
+            </div>
+          )}
+
           {onOpenMultiDeviceSync && (
             <button
               onClick={onOpenMultiDeviceSync}

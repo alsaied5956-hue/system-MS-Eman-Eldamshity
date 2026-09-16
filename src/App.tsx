@@ -77,6 +77,24 @@ import {
   dualSyncAttendanceDelete,
   dualSyncBulkStudents,
 } from "./utils/dualSync";
+import { useGlobalRealtimeSync } from "./hooks/useGlobalRealtimeSync";
+import {
+  cloudAddStudent,
+  cloudUpdateStudent,
+  cloudDeleteStudent,
+  cloudBulkImportStudents,
+  cloudRecordAttendance,
+  cloudFinishGroupAttendance,
+  cloudChangeAttendanceStatus,
+  cloudDeleteAttendance,
+  cloudRecordPayment,
+  cloudUpdatePayment,
+  cloudDeletePayment,
+  cloudRecordExamGrade,
+  cloudUpdateGroupPrices,
+  cloudUpdateUsers,
+  cloudFetchSystemConfigs,
+} from "./services/supabaseMutationService";
 import { Navbar } from "./components/Navbar";
 import { Sidebar } from "./components/Sidebar";
 import { AttendanceScanner } from "./components/AttendanceScanner";
@@ -265,6 +283,16 @@ export default function App() {
       }
     }).catch(() => {});
 
+    // Fetch authoritative system configs (groupPrices, usersList) from Supabase
+    cloudFetchSystemConfigs().then((configs) => {
+      if (configs.groupPrices && Object.keys(configs.groupPrices).length > 0) {
+        setGroupPrices(configs.groupPrices);
+      }
+      if (configs.usersList && configs.usersList.length > 0) {
+        setUsersList(configs.usersList);
+      }
+    }).catch(() => {});
+
     // 2. Immediately pull latest cloud state if device was turned off/offline
     pullLatestCloudDataImmediately().catch(() => {});
     // 3. Automatically send whatever was saved on local disk to Cloud if pending
@@ -422,6 +450,34 @@ export default function App() {
   scanLogTimesRef.current = scanLogTimes;
   const paymentsRef = useRef(payments);
   paymentsRef.current = payments;
+
+  // ⚡ Universal Supabase Realtime CDC Mirroring Engine: Listens to all Postgres changes
+  const handleRealtimeSyncNotice = useCallback((notice: { message: string; type?: "online-synced" | "offline-mode" }) => {
+    setSyncBanner({
+      show: true,
+      type: notice.type || "online-synced",
+      message: notice.message,
+    });
+    setTimeout(() => setSyncBanner(null), 4500);
+  }, []);
+
+  const globalRealtimeStatus = useGlobalRealtimeSync({
+    setStudents,
+    appStudentsRef,
+    setAttendanceToday,
+    attendanceTodayRef,
+    setAttendanceHistory,
+    attendanceHistoryRef,
+    setScanLogOrder,
+    scanLogOrderRef,
+    setScanLogTimes,
+    scanLogTimesRef,
+    setPayments,
+    paymentsRef,
+    setGroupPrices,
+    setUsersList,
+    onSyncNotice: handleRealtimeSyncNotice,
+  });
 
   // ⚡ Central Supabase Realtime Hub: Listen to Group Finalization, Payments, and Students across all devices (<20ms)
   useEffect(() => {
@@ -772,8 +828,8 @@ export default function App() {
     };
   }, []);
 
-  // Handler: Scan Attendance Record with 0ms race-condition-free ref updates
-  const handleRecordAttendance = useCallback((
+  // Handler: Scan Attendance Record with strict Cloud-First commit and 0ms race-condition-free ref updates
+  const handleRecordAttendance = useCallback(async (
     barcode: string,
     status: "حضور" | "تأخير",
     timeIso: string,
@@ -784,80 +840,95 @@ export default function App() {
 
     const todayKey = getTodayKey();
 
-    // 1. Immediately update synchronous references (immune to rapid scan drops)
-    if (!scanLogOrderRef.current.includes(cleanBarcode)) {
-      scanLogOrderRef.current = [cleanBarcode, ...scanLogOrderRef.current];
-    }
-    scanLogTimesRef.current = {
-      ...scanLogTimesRef.current,
-      [cleanBarcode]: timeIso,
-    };
-    attendanceTodayRef.current = {
-      ...attendanceTodayRef.current,
-      [cleanBarcode]: status,
-    };
-    attendanceHistoryRef.current = {
-      ...attendanceHistoryRef.current,
-      [todayKey]: {
-        ...(attendanceHistoryRef.current[todayKey] || {}),
-        [cleanBarcode]: status,
-      },
-    };
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase insertion into attendance_logs table
+      await cloudRecordAttendance(
+        cleanBarcode,
+        status,
+        timeIso,
+        student?.name || `طالب ${cleanBarcode}`,
+        currentUser?.username || "الماسح",
+        student
+      );
 
-    const prevStatus = attendanceTodayRef.current[cleanBarcode];
-    let updatedStudents = appStudentsRef.current;
-    
-    // Only increment attendance days if student was not already marked present today
-    if (!prevStatus || prevStatus === "غائب") {
-      updatedStudents = appStudentsRef.current.map((s) => {
-        if (String(s.barcode).trim() === cleanBarcode) {
-          return {
-            ...s,
-            totalAttendanceDays: (s.totalAttendanceDays || 0) + 1,
-          };
-        }
-        return s;
+      // 1. Immediately update synchronous references (immune to rapid scan drops)
+      if (!scanLogOrderRef.current.includes(cleanBarcode)) {
+        scanLogOrderRef.current = [cleanBarcode, ...scanLogOrderRef.current];
+      }
+      scanLogTimesRef.current = {
+        ...scanLogTimesRef.current,
+        [cleanBarcode]: timeIso,
+      };
+      attendanceTodayRef.current = {
+        ...attendanceTodayRef.current,
+        [cleanBarcode]: status,
+      };
+      attendanceHistoryRef.current = {
+        ...attendanceHistoryRef.current,
+        [todayKey]: {
+          ...(attendanceHistoryRef.current[todayKey] || {}),
+          [cleanBarcode]: status,
+        },
+      };
+
+      const prevStatus = attendanceTodayRef.current[cleanBarcode];
+      let updatedStudents = appStudentsRef.current;
+      
+      // Only increment attendance days if student was not already marked present today
+      if (!prevStatus || prevStatus === "غائب") {
+        updatedStudents = appStudentsRef.current.map((s) => {
+          if (String(s.barcode).trim() === cleanBarcode) {
+            return {
+              ...s,
+              totalAttendanceDays: (s.totalAttendanceDays || 0) + 1,
+            };
+          }
+          return s;
+        });
+        appStudentsRef.current = updatedStudents;
+        setStudents(updatedStudents);
+      }
+
+      // 2. Functional React updates ensure state is never dropped in rapid succession
+      setAttendanceToday((prev) => ({ ...prev, [cleanBarcode]: status }));
+      setAttendanceHistory((prev) => ({
+        ...prev,
+        [todayKey]: {
+          ...(prev[todayKey] || {}),
+          [cleanBarcode]: status,
+        },
+      }));
+      setScanLogOrder((prev) => (prev.includes(cleanBarcode) ? prev : [cleanBarcode, ...prev]));
+      setScanLogTimes((prev) => ({ ...prev, [cleanBarcode]: timeIso }));
+
+      // ⚡ Dual-Sync to Firebase immediately with sourceDeviceId
+      dualSyncLiveScan({
+        barcode: cleanBarcode,
+        name: student.name,
+        grade: student.groupGrade,
+        days: student.groupDays,
+        status,
+        timeIso,
+        timeDisplay: new Date(timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }),
+        isPaid: isStudentPaid(payments?.[getCurrentMonthKey()], cleanBarcode),
+        scannedBy: currentUser?.username || "الماسح",
+        studentFallback: student,
+        sourceDeviceId: getPersistentDeviceId(),
       });
-      appStudentsRef.current = updatedStudents;
-      setStudents(updatedStudents);
+
+      // Instant local save with batching using authoritative refs
+      saveAttendanceAndStudentsBatch(
+        attendanceTodayRef.current,
+        scanLogOrderRef.current,
+        scanLogTimesRef.current,
+        updatedStudents,
+        false,
+        true
+      );
+    } catch (err: any) {
+      console.error("[App] Failed to commit scan attendance to cloud:", err);
+      alert(`❌ فشل تسجيل الحضور في السحابة: ${err?.message || "خطأ في الاتصال"}`);
     }
-
-    // 2. Functional React updates ensure state is never dropped in rapid succession
-    setAttendanceToday((prev) => ({ ...prev, [cleanBarcode]: status }));
-    setAttendanceHistory((prev) => ({
-      ...prev,
-      [todayKey]: {
-        ...(prev[todayKey] || {}),
-        [cleanBarcode]: status,
-      },
-    }));
-    setScanLogOrder((prev) => (prev.includes(cleanBarcode) ? prev : [cleanBarcode, ...prev]));
-    setScanLogTimes((prev) => ({ ...prev, [cleanBarcode]: timeIso }));
-
-    // ⚡ Dual-Sync to Firebase and Supabase immediately with sourceDeviceId
-    dualSyncLiveScan({
-      barcode: cleanBarcode,
-      name: student.name,
-      grade: student.groupGrade,
-      days: student.groupDays,
-      status,
-      timeIso,
-      timeDisplay: new Date(timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }),
-      isPaid: isStudentPaid(payments?.[getCurrentMonthKey()], cleanBarcode),
-      scannedBy: currentUser?.username || "الماسح",
-      studentFallback: student,
-      sourceDeviceId: getPersistentDeviceId(),
-    });
-
-    // Instant local save with batching using authoritative refs
-    saveAttendanceAndStudentsBatch(
-      attendanceTodayRef.current,
-      scanLogOrderRef.current,
-      scanLogTimesRef.current,
-      updatedStudents,
-      false,
-      true
-    );
   }, [payments, currentUser]);
 
   // Handler: Manual sync for group attendance session in one single operation
@@ -865,15 +936,15 @@ export default function App() {
     return await flushPendingSyncToCloud(true);
   }, []);
 
-  // Handler: Finish and Lock Group Session
-  const handleFinishGroup = useCallback((
+  // Handler: Finish and Lock Group Session with strict Cloud-First commit
+  const handleFinishGroup = useCallback(async (
     grade: GradeName,
     days: GroupDays,
     absentList: { student: Student; message: string; type?: "غائب" }[],
     lateList: { student: Student; message: string; type?: "تأخير" }[],
     crossDayList?: { student: Student; message: string; type?: "عكس_أيام" }[]
   ) => {
-    // 1️⃣ Live Event Pipeline: Coordinated batch push to `live_events/today` without document write collisions
+    // 1️⃣ Live Event Pipeline: Coordinated batch push to `live_events/today`
     const batchEvents = [
       ...(absentList || []).map((a) => ({
         studentId: a.student.barcode,
@@ -894,19 +965,19 @@ export default function App() {
       (s) => s.groupGrade === grade && s.groupDays === days
     );
 
+    const absentBarcodesList = (absentList || []).map((a) => String(a.student.barcode).trim());
+    const lateBarcodesList = (lateList || []).map((l) => String(l.student.barcode).trim());
+    const todayKey = getTodayKey();
+
     const updatedToday = { ...attendanceTodayRef.current, ...attendanceToday };
-    const absentBarcodes = new Set((absentList || []).map((a) => String(a.student.barcode).trim()));
-    const lateBarcodes = new Set((lateList || []).map((l) => String(l.student.barcode).trim()));
+    const absentBarcodes = new Set(absentBarcodesList);
+    const lateBarcodes = new Set(lateBarcodesList);
     
-    // 1. Explicitly update status for EVERY student registered in this group:
-    // Anyone in lateBarcodes becomes "تأخير"
-    // All scanned queue students in this group become "حضور"
-    // Anyone in absentBarcodes becomes "غائب" UNLESS they were already marked "حضور" or "تأخير"!
+    // Explicitly update status for EVERY student registered in this group
     groupStudents.forEach((student) => {
       const b = String(student.barcode).trim();
       const priorStatus = attendanceTodayRef.current[b] || attendanceToday[b];
       if (absentBarcodes.has(b)) {
-        // If the student was ALREADY scanned or marked present today, never downgrade them to absent!
         if (priorStatus === "حضور" || priorStatus === "تأخير") {
           updatedToday[b] = priorStatus;
         } else {
@@ -919,66 +990,87 @@ export default function App() {
       }
     });
 
-    // 2. Also ensure makeup cross-day students are marked in today's attendance
     (crossDayList || []).forEach((item) => {
       const b = String(item.student.barcode).trim();
       updatedToday[b] = attendanceToday[b] === "تأخير" ? "تأخير" : "حضور";
     });
 
-    const todayKey = getTodayKey();
-    const updatedHistory = {
-      ...attendanceHistory,
-      [todayKey]: updatedToday,
-    };
+    const presentBarcodesList = groupStudents
+      .map((s) => String(s.barcode).trim())
+      .filter((b) => updatedToday[b] === "حضور");
 
-    const updatedStudents = (appStudentsRef.current || students).map((s) => {
-      const b = String(s.barcode).trim();
-      if (absentBarcodes.has(b) && updatedToday[b] === "غائب") {
-        const wasAbsent = attendanceToday[b] === "غائب";
-        if (!wasAbsent) {
-          return {
-            ...s,
-            totalAbsentDays: (s.totalAbsentDays || 0) + 1,
-            totalAttendanceDays: Math.max(0, (s.totalAttendanceDays || 0) - 1),
-          };
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase batch attendance logs
+      await cloudFinishGroupAttendance(
+        grade,
+        days,
+        todayKey,
+        absentBarcodesList.filter(b => updatedToday[b] === "غائب"),
+        lateBarcodesList,
+        presentBarcodesList,
+        currentUser?.username || "الماسح",
+        groupStudents
+      );
+
+      const updatedHistory = {
+        ...attendanceHistory,
+        [todayKey]: updatedToday,
+      };
+
+      const updatedStudents = (appStudentsRef.current || students).map((s) => {
+        const b = String(s.barcode).trim();
+        if (absentBarcodes.has(b) && updatedToday[b] === "غائب") {
+          const wasAbsent = attendanceToday[b] === "غائب";
+          if (!wasAbsent) {
+            return {
+              ...s,
+              totalAbsentDays: (s.totalAbsentDays || 0) + 1,
+              totalAttendanceDays: Math.max(0, (s.totalAttendanceDays || 0) - 1),
+            };
+          }
         }
-      }
-      return s;
-    });
+        return s;
+      });
 
-    // CRITICAL: PRESERVE scanLogOrder and scanLogTimes! Do NOT wipe the active queue upon group save!
-    const currentScanOrder = scanLogOrderRef.current.length > 0 ? scanLogOrderRef.current : scanLogOrder;
-    const currentScanTimes = Object.keys(scanLogTimesRef.current).length > 0 ? scanLogTimesRef.current : scanLogTimes;
+      const currentScanOrder = scanLogOrderRef.current.length > 0 ? scanLogOrderRef.current : scanLogOrder;
+      const currentScanTimes = Object.keys(scanLogTimesRef.current).length > 0 ? scanLogTimesRef.current : scanLogTimes;
 
-    attendanceTodayRef.current = updatedToday;
-    attendanceHistoryRef.current = updatedHistory;
-    appStudentsRef.current = updatedStudents;
-    scanLogOrderRef.current = currentScanOrder;
-    scanLogTimesRef.current = currentScanTimes;
+      attendanceTodayRef.current = updatedToday;
+      attendanceHistoryRef.current = updatedHistory;
+      appStudentsRef.current = updatedStudents;
+      scanLogOrderRef.current = currentScanOrder;
+      scanLogTimesRef.current = currentScanTimes;
 
-    setAttendanceToday(updatedToday);
-    setAttendanceHistory(updatedHistory);
-    setStudents(updatedStudents);
-    setScanLogOrder(currentScanOrder);
-    setScanLogTimes(currentScanTimes);
+      setAttendanceToday(updatedToday);
+      setAttendanceHistory(updatedHistory);
+      setStudents(updatedStudents);
+      setScanLogOrder(currentScanOrder);
+      setScanLogTimes(currentScanTimes);
 
-    // Save and immediately sync to cloud and local storage with the preserved scan queue
-    saveAttendanceAndStudentsBatch(updatedToday, currentScanOrder, currentScanTimes, updatedStudents, true);
+      saveAttendanceAndStudentsBatch(updatedToday, currentScanOrder, currentScanTimes, updatedStudents, true);
 
-    // ⚡ Dual-Sync Group Finalization to Firebase and Supabase
-    dualSyncGroupFinished({
-      grade,
-      days,
-      absentBarcodes: Array.from(absentBarcodes).filter(b => updatedToday[b] === "غائب"),
-      lateBarcodes: Array.from(lateBarcodes),
-      presentBarcodes: groupStudents
-        .map((s) => String(s.barcode).trim())
-        .filter((b) => updatedToday[b] === "حضور"),
-      dateKey: todayKey,
-      finishedBy: currentUser?.username || "الماسح",
-      allStudents: groupStudents,
-    });
-  }, [attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, currentUser]);
+      dualSyncGroupFinished({
+        grade,
+        days,
+        absentBarcodes: Array.from(absentBarcodes).filter(b => updatedToday[b] === "غائب"),
+        lateBarcodes: Array.from(lateBarcodes),
+        presentBarcodes: presentBarcodesList,
+        dateKey: todayKey,
+        finishedBy: currentUser?.username || "الماسح",
+        allStudents: groupStudents,
+      });
+
+      setSyncBanner({
+        show: true,
+        type: "online-synced",
+        message: `⚡ تم تثبيت حضور مجموعة (${grade} - ${days}) في السحابة وانعكاسها على كافة الأجهزة!`,
+      });
+      setTimeout(() => setSyncBanner(null), 4000);
+    } catch (err: any) {
+      console.error("[App] Failed to commit group attendance to cloud:", err);
+      alert(`❌ فشل تثبيت حضور المجموعة في السحابة: ${err?.message || "خطأ في الاتصال"}`);
+    }
+  }, [attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, students, currentUser]);
 
   // Handler: Remove single student from active scanner screen
   const handleRemoveFromScanner = useCallback((barcode: string) => {
@@ -1007,49 +1099,68 @@ export default function App() {
   }, []);
 
   // Handler: Add Single Student
-  const handleAddStudent = useCallback((newStudent: Student, cardFee = 0) => {
-    const updated = [newStudent, ...students];
-    setStudents(updated);
-    saveStudentsData(updated);
+  const handleAddStudent = useCallback(async (newStudent: Student, cardFee = 0) => {
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase insertion
+      await cloudAddStudent(newStudent);
 
-    // ⚡ Dual-Sync: Supabase + Firebase
-    dualSyncStudentSave(newStudent, "add");
+      const updated = [newStudent, ...students];
+      setStudents(updated);
+      saveStudentsData(updated);
 
-    if (cardFee > 0) {
-      const today = getTodayKey();
-      const monthKey = getCurrentMonthKey();
-      const newPayment: PaymentRecord = {
-        barcode: newStudent.barcode,
-        month: monthKey,
-        monthKey,
-        amount: cardFee,
-        date: today,
-        time: formatTimeArabic(),
-        note: "رسوم استخراج كارت الباركود الذكي",
-        isCardFee: true,
-        recordedBy: currentUser?.username || "admin",
-      };
-      const monthData = payments[monthKey] || {};
-      const updatedPayments = {
-        ...payments,
-        [monthKey]: {
-          ...monthData,
-          [`card_${newStudent.barcode}`]: newPayment,
-        },
-      };
-      setPayments(updatedPayments);
-      savePaymentsData(updatedPayments);
+      // Dual-Sync for backward compatibility
+      dualSyncStudentSave(newStudent, "add");
 
-      dualSyncPaymentRecord({
-        barcode: newStudent.barcode,
-        monthKey,
-        amount: cardFee,
-        date: today,
-        time: newPayment.time,
-        note: newPayment.note,
-        recordedBy: currentUser?.username || "admin",
-        studentFallback: newStudent,
-      });
+      if (cardFee > 0) {
+        const today = getTodayKey();
+        const monthKey = getCurrentMonthKey();
+        const newPayment: PaymentRecord = {
+          barcode: newStudent.barcode,
+          month: monthKey,
+          monthKey,
+          amount: cardFee,
+          date: today,
+          time: formatTimeArabic(),
+          note: "رسوم استخراج كارت الباركود الذكي",
+          isCardFee: true,
+          recordedBy: currentUser?.username || "admin",
+        };
+
+        await cloudRecordPayment({
+          barcode: newStudent.barcode,
+          amount: cardFee,
+          monthKey,
+          date: today,
+          note: newPayment.note,
+          recordedBy: currentUser?.username || "admin",
+          studentFallback: newStudent,
+        });
+
+        const monthData = payments[monthKey] || {};
+        const updatedPayments = {
+          ...payments,
+          [monthKey]: {
+            ...monthData,
+            [`card_${newStudent.barcode}`]: newPayment,
+          },
+        };
+        setPayments(updatedPayments);
+        savePaymentsData(updatedPayments);
+
+        dualSyncPaymentRecord({
+          barcode: newStudent.barcode,
+          monthKey,
+          amount: cardFee,
+          date: today,
+          time: newPayment.time,
+          note: newPayment.note,
+          recordedBy: currentUser?.username || "admin",
+          studentFallback: newStudent,
+        });
+      }
+    } catch (err: any) {
+      console.error("[App] Failed to add student to cloud:", err);
+      alert(`❌ فشل إضافة الطالب في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
   }, [students, payments, currentUser]);
 
@@ -1060,73 +1171,96 @@ export default function App() {
   }, []);
 
   // Handler: Bulk Import Students from Excel
-  const handleBulkImport = useCallback((newStudentsList: Student[]) => {
-    const updated = [...newStudentsList, ...students];
-    setStudents(updated);
-    saveStudentsData(updated);
-
-    // ⚡ Dual-Sync Bulk Students to Firebase & Supabase
-    dualSyncBulkStudents(newStudentsList);
+  const handleBulkImport = useCallback(async (newStudentsList: Student[]) => {
+    try {
+      await cloudBulkImportStudents(newStudentsList);
+      const updated = [...newStudentsList, ...students];
+      setStudents(updated);
+      saveStudentsData(updated);
+      dualSyncBulkStudents(newStudentsList);
+      setSyncBanner({
+        show: true,
+        type: "online-synced",
+        message: `⚡ تم استيراد وحفظ ${newStudentsList.length} طالب سحابياً بنجاح!`,
+      });
+      setTimeout(() => setSyncBanner(null), 4000);
+    } catch (err: any) {
+      console.error("[App] Failed to bulk import students to cloud:", err);
+      alert(`❌ فشل استيراد الطلاب سحابياً: ${err?.message || "خطأ غير معروف"}`);
+    }
   }, [students]);
 
   // Handler: Update Student Info (with full barcode migration)
-  const handleUpdateStudent = useCallback((oldBarcode: string, updatedStudent: Student) => {
-    const updated = students.map((s) => (s.barcode === oldBarcode ? updatedStudent : s));
-    setStudents(updated);
+  const handleUpdateStudent = useCallback(async (oldBarcode: string, updatedStudent: Student) => {
+    try {
+      await cloudUpdateStudent(oldBarcode, updatedStudent);
 
-    if (oldBarcode !== updatedStudent.barcode) {
-      // Migrate attendance today
-      const newAttToday = { ...attendanceToday };
-      if (newAttToday[oldBarcode]) {
-        newAttToday[updatedStudent.barcode] = newAttToday[oldBarcode];
-        delete newAttToday[oldBarcode];
-        setAttendanceToday(newAttToday);
+      const updated = students.map((s) => (s.barcode === oldBarcode ? updatedStudent : s));
+      setStudents(updated);
+
+      if (oldBarcode !== updatedStudent.barcode) {
+        // Migrate attendance today
+        const newAttToday = { ...attendanceToday };
+        if (newAttToday[oldBarcode]) {
+          newAttToday[updatedStudent.barcode] = newAttToday[oldBarcode];
+          delete newAttToday[oldBarcode];
+          setAttendanceToday(newAttToday);
+        }
+
+        // Migrate scan log
+        const newScanOrder = scanLogOrder.map((b) => (b === oldBarcode ? updatedStudent.barcode : b));
+        const newScanTimes = { ...scanLogTimes };
+        if (newScanTimes[oldBarcode]) {
+          newScanTimes[updatedStudent.barcode] = newScanTimes[oldBarcode];
+          delete newScanTimes[oldBarcode];
+        }
+        setScanLogOrder(newScanOrder);
+        setScanLogTimes(newScanTimes);
+
+        saveAttendanceAndStudentsBatch(newAttToday, newScanOrder, newScanTimes, updated);
+
+        dualSyncStudentDelete(oldBarcode);
+        dualSyncStudentSave(updatedStudent, "add");
+      } else {
+        saveStudentsData(updated);
+        dualSyncStudentSave(updatedStudent, "update");
       }
-
-      // Migrate scan log
-      const newScanOrder = scanLogOrder.map((b) => (b === oldBarcode ? updatedStudent.barcode : b));
-      const newScanTimes = { ...scanLogTimes };
-      if (newScanTimes[oldBarcode]) {
-        newScanTimes[updatedStudent.barcode] = newScanTimes[oldBarcode];
-        delete newScanTimes[oldBarcode];
-      }
-      setScanLogOrder(newScanOrder);
-      setScanLogTimes(newScanTimes);
-
-      saveAttendanceAndStudentsBatch(newAttToday, newScanOrder, newScanTimes, updated);
-
-      dualSyncStudentDelete(oldBarcode);
-      dualSyncStudentSave(updatedStudent, "add");
-    } else {
-      saveStudentsData(updated);
-      dualSyncStudentSave(updatedStudent, "update");
+    } catch (err: any) {
+      console.error("[App] Failed to update student in cloud:", err);
+      alert(`❌ فشل تحديث بيانات الطالب في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
   }, [students, attendanceToday, scanLogOrder, scanLogTimes]);
 
   // Handler: Delete Single Student
-  const handleDeleteStudent = useCallback((barcode: string) => {
+  const handleDeleteStudent = useCallback(async (barcode: string) => {
     const student = students.find((s) => s.barcode === barcode);
-    const updated = students.filter((s) => s.barcode !== barcode);
-    setStudents(updated);
-    saveStudentsData(updated, barcode);
+    try {
+      await cloudDeleteStudent(barcode);
 
-    // Clean up local scans and today's attendance for the deleted student
-    setAttendanceToday((prev) => {
-      if (!prev[barcode]) return prev;
-      const next = { ...prev };
-      delete next[barcode];
-      return next;
-    });
-    setScanLogOrder((prev) => prev.filter((b) => b !== barcode));
-    setScanLogTimes((prev) => {
-      if (!prev[barcode]) return prev;
-      const next = { ...prev };
-      delete next[barcode];
-      return next;
-    });
+      const updated = students.filter((s) => s.barcode !== barcode);
+      setStudents(updated);
+      saveStudentsData(updated, barcode);
 
-    // ⚡ Dual-Sync Delete Student from Supabase & Firebase
-    dualSyncStudentDelete(barcode, student?.id);
+      // Clean up local scans and today's attendance for the deleted student
+      setAttendanceToday((prev) => {
+        if (!prev[barcode]) return prev;
+        const next = { ...prev };
+        delete next[barcode];
+        return next;
+      });
+      setScanLogOrder((prev) => prev.filter((b) => b !== barcode));
+      setScanLogTimes((prev) => {
+        if (!prev[barcode]) return prev;
+        const next = { ...prev };
+        delete next[barcode];
+        return next;
+      });
+
+      dualSyncStudentDelete(barcode, student?.id);
+    } catch (err: any) {
+      console.error("[App] Failed to delete student from cloud:", err);
+      alert(`❌ فشل حذف الطالب من السحابة: ${err?.message || "خطأ غير معروف"}`);
+    }
   }, [students]);
 
   // Handler: Clear All Data
@@ -1140,75 +1274,90 @@ export default function App() {
   }, []);
 
   // Handler: Manual Status Change in Attendance Report or Scanner
-  const handleChangeAttendanceStatus = useCallback((barcode: string, dateKey: string, newStatus: string) => {
+  const handleChangeAttendanceStatus = useCallback(async (barcode: string, dateKey: string, newStatus: string) => {
     const todayKey = getTodayKey();
     const isToday = dateKey === todayKey;
     
     const prevStatus = isToday ? attendanceToday[barcode] : (attendanceHistory[dateKey]?.[barcode]);
     if (prevStatus === newStatus) return;
 
-    const dateMap = attendanceHistory[dateKey] || {};
-    const updatedDateMap = { ...dateMap, [barcode]: newStatus };
-    const updatedHistory = { ...attendanceHistory, [dateKey]: updatedDateMap };
-
-    setAttendanceHistory(updatedHistory);
-
-    let updatedToday = attendanceToday;
-    if (isToday) {
-      updatedToday = { ...attendanceToday, [barcode]: newStatus };
-      setAttendanceToday(updatedToday);
-    }
-
-    const updatedStudents = students.map((s) => {
-      if (s.barcode === barcode) {
-        let attCount = s.totalAttendanceDays || 0;
-        let absCount = s.totalAbsentDays || 0;
-
-        // Undo previous status count
-        if (prevStatus === "حضور" || prevStatus === "تأخير") {
-          attCount = Math.max(0, attCount - 1);
-        } else if (prevStatus === "غائب") {
-          absCount = Math.max(0, absCount - 1);
-        }
-
-        // Apply new status count
-        if (newStatus === "حضور" || newStatus === "تأخير") {
-          attCount += 1;
-        } else if (newStatus === "غائب") {
-          absCount += 1;
-        }
-
-        return {
-          ...s,
-          totalAttendanceDays: attCount,
-          totalAbsentDays: absCount,
-        };
-      }
-      return s;
-    });
-
-    setStudents(updatedStudents);
-
-    // Save and sync atomically for both today and historical date changes
-    if (isToday) {
-      saveAttendanceAndStudentsBatch(updatedToday, scanLogOrder, scanLogTimes, updatedStudents, true);
-    } else {
-      saveAttendanceHistoryData(updatedHistory, updatedStudents);
-    }
-
     const studentObj = students.find((s) => s.barcode === barcode);
-    dualSyncAttendanceStatusChange({
-      barcode,
-      studentName: studentObj?.name || `طالب ${barcode}`,
-      status: newStatus,
-      dateKey,
-      updatedBy: currentUser?.username || "admin",
-      studentFallback: studentObj,
-    });
+
+    try {
+      // ⚡ Cloud-First: Commit to Supabase attendance_logs
+      await cloudChangeAttendanceStatus(
+        barcode,
+        dateKey,
+        newStatus,
+        studentObj?.name || `طالب ${barcode}`,
+        currentUser?.username || "admin"
+      );
+
+      const dateMap = attendanceHistory[dateKey] || {};
+      const updatedDateMap = { ...dateMap, [barcode]: newStatus };
+      const updatedHistory = { ...attendanceHistory, [dateKey]: updatedDateMap };
+
+      setAttendanceHistory(updatedHistory);
+
+      let updatedToday = attendanceToday;
+      if (isToday) {
+        updatedToday = { ...attendanceToday, [barcode]: newStatus };
+        setAttendanceToday(updatedToday);
+      }
+
+      const updatedStudents = students.map((s) => {
+        if (s.barcode === barcode) {
+          let attCount = s.totalAttendanceDays || 0;
+          let absCount = s.totalAbsentDays || 0;
+
+          // Undo previous status count
+          if (prevStatus === "حضور" || prevStatus === "تأخير") {
+            attCount = Math.max(0, attCount - 1);
+          } else if (prevStatus === "غائب") {
+            absCount = Math.max(0, absCount - 1);
+          }
+
+          // Apply new status count
+          if (newStatus === "حضور" || newStatus === "تأخير") {
+            attCount += 1;
+          } else if (newStatus === "غائب") {
+            absCount += 1;
+          }
+
+          return {
+            ...s,
+            totalAttendanceDays: attCount,
+            totalAbsentDays: absCount,
+          };
+        }
+        return s;
+      });
+
+      setStudents(updatedStudents);
+
+      // Save and sync atomically for both today and historical date changes
+      if (isToday) {
+        saveAttendanceAndStudentsBatch(updatedToday, scanLogOrder, scanLogTimes, updatedStudents, true);
+      } else {
+        saveAttendanceHistoryData(updatedHistory, updatedStudents);
+      }
+
+      dualSyncAttendanceStatusChange({
+        barcode,
+        studentName: studentObj?.name || `طالب ${barcode}`,
+        status: newStatus,
+        dateKey,
+        updatedBy: currentUser?.username || "admin",
+        studentFallback: studentObj,
+      });
+    } catch (err: any) {
+      console.error("[App] Failed to change attendance status in cloud:", err);
+      alert(`❌ فشل تعديل حالة الحضور سحابياً: ${err?.message || "خطأ غير معروف"}`);
+    }
   }, [attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, students, currentUser]);
 
   // Handler: Record Payment
-  const handleRecordPayment = useCallback((
+  const handleRecordPayment = useCallback(async (
     barcode: string,
     amount: number,
     monthKey: string,
@@ -1216,45 +1365,62 @@ export default function App() {
   ) => {
     const today = getTodayKey();
     const time = formatTimeArabic();
+    const noteText = note || `اشتراك شهر ${monthKey}`;
+    const studentObj = students.find((s) => s.barcode === barcode);
 
-    const monthData = payments[monthKey] || {};
-    const newRecord: PaymentRecord = {
-      barcode,
-      month: monthKey,
-      monthKey,
-      amount,
-      date: today,
-      time,
-      note: note || `اشتراك شهر ${monthKey}`,
-      recordedBy: currentUser?.username || "admin",
-    };
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase insertion
+      await cloudRecordPayment({
+        barcode,
+        amount,
+        monthKey,
+        date: today,
+        note: noteText,
+        recordedBy: currentUser?.username || "admin",
+        studentFallback: studentObj,
+      });
 
-    const updatedPayments = {
-      ...payments,
-      [monthKey]: {
-        ...monthData,
-        [barcode]: newRecord,
-      },
-    };
+      const monthData = payments[monthKey] || {};
+      const newRecord: PaymentRecord = {
+        barcode,
+        month: monthKey,
+        monthKey,
+        amount,
+        date: today,
+        time,
+        note: noteText,
+        recordedBy: currentUser?.username || "admin",
+      };
 
-    setPayments(updatedPayments);
-    savePaymentsData(updatedPayments);
+      const updatedPayments = {
+        ...payments,
+        [monthKey]: {
+          ...monthData,
+          [barcode]: newRecord,
+        },
+      };
 
-    // ⚡ Dual-Sync Payment to Firebase and Supabase
-    dualSyncPaymentRecord({
-      barcode,
-      monthKey,
-      amount,
-      date: today,
-      time,
-      note: note || `اشتراك شهر ${monthKey}`,
-      recordedBy: currentUser?.username || "admin",
-      studentFallback: students.find((s) => s.barcode === barcode),
-    });
+      setPayments(updatedPayments);
+      savePaymentsData(updatedPayments);
+
+      dualSyncPaymentRecord({
+        barcode,
+        monthKey,
+        amount,
+        date: today,
+        time,
+        note: noteText,
+        recordedBy: currentUser?.username || "admin",
+        studentFallback: studentObj,
+      });
+    } catch (err: any) {
+      console.error("[App] Failed to record payment in cloud:", err);
+      alert(`❌ فشل تسجيل الاشتراك في السحابة: ${err?.message || "خطأ غير معروف"}`);
+    }
   }, [payments, currentUser, students]);
 
   // Handler: Update / Move Payment (e.g. change month from 8 to 9, or correct amount/notes)
-  const handleUpdatePayment = useCallback((
+  const handleUpdatePayment = useCallback(async (
     oldMonthKey: string,
     barcode: string,
     newMonthKey: string,
@@ -1265,71 +1431,98 @@ export default function App() {
     const existing = payments[oldMonthKey]?.[barcode];
     const today = getTodayKey();
     const time = formatTimeArabic();
+    const finalDate = newDate || existing?.date || today;
+    const finalNote = newNote || `اشتراك شهر ${newMonthKey}`;
+    const studentObj = students.find((s) => s.barcode === barcode);
 
-    const updatedPayments = { ...payments };
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase update
+      await cloudUpdatePayment({
+        oldMonthKey,
+        newMonthKey,
+        barcode,
+        newAmount,
+        newNote: finalNote,
+        newDate: finalDate,
+        recordedBy: existing?.recordedBy || currentUser?.username || "admin",
+        studentFallback: studentObj,
+      });
 
-    // Remove from old month
-    if (updatedPayments[oldMonthKey]) {
-      const oldMonthMap = { ...updatedPayments[oldMonthKey] };
-      delete oldMonthMap[barcode];
-      updatedPayments[oldMonthKey] = oldMonthMap;
+      const updatedPayments = { ...payments };
+
+      // Remove from old month
+      if (updatedPayments[oldMonthKey]) {
+        const oldMonthMap = { ...updatedPayments[oldMonthKey] };
+        delete oldMonthMap[barcode];
+        updatedPayments[oldMonthKey] = oldMonthMap;
+      }
+
+      // Add to new month
+      const newMonthMap = { ...(updatedPayments[newMonthKey] || {}) };
+      newMonthMap[barcode] = {
+        barcode,
+        month: newMonthKey,
+        monthKey: newMonthKey,
+        amount: newAmount,
+        date: finalDate,
+        time: existing?.time || time,
+        note: finalNote,
+        recordedBy: existing?.recordedBy || currentUser?.username || "admin",
+        isCardFee: existing?.isCardFee,
+      };
+      updatedPayments[newMonthKey] = newMonthMap;
+
+      setPayments(updatedPayments);
+      savePaymentsData(updatedPayments);
+
+      dualSyncPaymentUpdate({
+        oldMonthKey,
+        newMonthKey,
+        barcode,
+        newAmount,
+        newNote: finalNote,
+        newDate: finalDate,
+        recordedBy: existing?.recordedBy || currentUser?.username || "admin",
+        studentFallback: studentObj,
+      });
+    } catch (err: any) {
+      console.error("[App] Failed to update payment in cloud:", err);
+      alert(`❌ فشل تعديل الاشتراك في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
-
-    // Add to new month
-    const newMonthMap = { ...(updatedPayments[newMonthKey] || {}) };
-    newMonthMap[barcode] = {
-      barcode,
-      month: newMonthKey,
-      monthKey: newMonthKey,
-      amount: newAmount,
-      date: newDate || existing?.date || today,
-      time: existing?.time || time,
-      note: newNote || `اشتراك شهر ${newMonthKey}`,
-      recordedBy: existing?.recordedBy || currentUser?.username || "admin",
-      isCardFee: existing?.isCardFee,
-    };
-    updatedPayments[newMonthKey] = newMonthMap;
-
-    setPayments(updatedPayments);
-    savePaymentsData(updatedPayments);
-
-    // ⚡ Dual-Sync Payment Update to Firebase and Supabase
-    dualSyncPaymentUpdate({
-      oldMonthKey,
-      newMonthKey,
-      barcode,
-      newAmount,
-      newNote,
-      newDate: newDate || existing?.date || today,
-      recordedBy: existing?.recordedBy || currentUser?.username || "admin",
-      studentFallback: students.find((s) => s.barcode === barcode),
-    });
   }, [payments, currentUser, students]);
 
   // Handler: Delete Payment (revert student to unpaid for this month)
-  const handleDeletePayment = useCallback((monthKey: string, barcode: string) => {
+  const handleDeletePayment = useCallback(async (monthKey: string, barcode: string) => {
     if (!payments[monthKey]?.[barcode]) return;
 
     const paymentRecord = payments[monthKey][barcode];
-    const updatedPayments = { ...payments };
-    const monthMap = { ...updatedPayments[monthKey] };
-    delete monthMap[barcode];
-    updatedPayments[monthKey] = monthMap;
 
-    const paymentKey = `${monthKey}_${String(barcode).trim()}`;
-    setPayments(updatedPayments);
-    savePaymentsData(updatedPayments, paymentKey);
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase deletion
+      await cloudDeletePayment(monthKey, barcode, paymentRecord?.id);
 
-    // ⚡ Dual-Sync Payment Deletion from Firebase and Supabase
-    dualSyncPaymentDelete({
-      barcode,
-      monthKey,
-      paymentId: paymentRecord?.id,
-    });
+      const updatedPayments = { ...payments };
+      const monthMap = { ...updatedPayments[monthKey] };
+      delete monthMap[barcode];
+      updatedPayments[monthKey] = monthMap;
+
+      const paymentKey = `${monthKey}_${String(barcode).trim()}`;
+      setPayments(updatedPayments);
+      savePaymentsData(updatedPayments, paymentKey);
+
+      dualSyncPaymentDelete({
+        barcode,
+        monthKey,
+        paymentId: paymentRecord?.id,
+      });
+    } catch (err: any) {
+      console.error("[App] Failed to delete payment from cloud:", err);
+      alert(`❌ فشل حذف الاشتراك من السحابة: ${err?.message || "خطأ غير معروف"}`);
+    }
   }, [payments]);
 
   // Handler: Record Exam Grade
-  const handleRecordExamGrade = useCallback((
+  const handleRecordExamGrade = useCallback(async (
     barcode: string,
     examTitle: string,
     score: number,
@@ -1337,43 +1530,57 @@ export default function App() {
   ) => {
     const pct = Math.round((score / maxScore) * 100);
     const scoreFormatted = `${score}/${maxScore} (${pct}%)`;
-
     const targetStudent = students.find((s) => s.barcode === barcode);
-    const updated = students.map((s) => {
-      if (s.barcode === barcode) {
-        const scores = s.totalExamScores ? [...s.totalExamScores, pct] : [pct];
-        const pointsBonus = pct === 100 ? 20 : pct >= 90 ? 10 : pct >= 75 ? 5 : 0;
 
-        return {
-          ...s,
-          lastExamTitle: examTitle,
-          lastExamScore: scoreFormatted,
-          totalExamScores: scores,
-          points: (s.points || 0) + pointsBonus,
-        };
-      }
-      return s;
-    });
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase insertion into homework table
+      await cloudRecordExamGrade({
+        barcode,
+        studentName: targetStudent?.name || `طالب ${barcode}`,
+        examTitle,
+        score,
+        maxScore,
+        recordedBy: currentUser?.username || "admin",
+      });
 
-    setStudents(updated);
-    saveStudentsData(updated);
+      const updated = students.map((s) => {
+        if (s.barcode === barcode) {
+          const scores = s.totalExamScores ? [...s.totalExamScores, pct] : [pct];
+          const pointsBonus = pct === 100 ? 20 : pct >= 90 ? 10 : pct >= 75 ? 5 : 0;
 
-    // ⚡ Dual-Sync Exam Grade to Firebase and Supabase
-    dualSyncExamGrade({
-      barcode,
-      studentName: targetStudent?.name,
-      examTitle,
-      score,
-      maxScore,
-      percentage: pct,
-      notes: `رصد درجة امتحان: ${examTitle} (${scoreFormatted})`,
-      recordedBy: currentUser?.username || "admin",
-      studentFallback: targetStudent,
-    });
+          return {
+            ...s,
+            lastExamTitle: examTitle,
+            lastExamScore: scoreFormatted,
+            totalExamScores: scores,
+            points: (s.points || 0) + pointsBonus,
+          };
+        }
+        return s;
+      });
+
+      setStudents(updated);
+      saveStudentsData(updated);
+
+      dualSyncExamGrade({
+        barcode,
+        studentName: targetStudent?.name,
+        examTitle,
+        score,
+        maxScore,
+        percentage: pct,
+        notes: `رصد درجة امتحان: ${examTitle} (${scoreFormatted})`,
+        recordedBy: currentUser?.username || "admin",
+        studentFallback: targetStudent,
+      });
+    } catch (err: any) {
+      console.error("[App] Failed to record exam grade to cloud:", err);
+      alert(`❌ فشل رصد الدرجة في السحابة: ${err?.message || "خطأ غير معروف"}`);
+    }
   }, [students, currentUser]);
 
   // Handler: Update Grade Record from Cumulative Table
-  const handleUpdateGradeRecord = useCallback((
+  const handleUpdateGradeRecord = useCallback(async (
     barcode: string,
     lastTitle: string,
     lastScore: string,
@@ -1381,46 +1588,62 @@ export default function App() {
     updatedScores: number[]
   ) => {
     const targetStudent = students.find((s) => s.barcode === barcode);
-    const updated = students.map((s) => {
-      if (s.barcode === barcode) {
-        return {
-          ...s,
-          lastExamTitle: lastTitle,
-          lastExamScore: lastScore,
-          points: newPoints,
-          totalExamScores: updatedScores,
-        };
-      }
-      return s;
-    });
-    setStudents(updated);
-    saveStudentsData(updated);
-
     const match = lastScore.match(/^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)/);
     const score = match ? parseFloat(match[1]) : 100;
     const maxScore = match ? parseFloat(match[2]) : 100;
+    const pct = Math.round((score / maxScore) * 100);
 
-    // ⚡ Dual-Sync Exam Grade modification to Firebase and Supabase
-    dualSyncExamGrade({
-      barcode,
-      studentName: targetStudent?.name,
-      examTitle: lastTitle,
-      score,
-      maxScore,
-      notes: `تعديل رصد درجة: ${lastTitle} (${lastScore})`,
-      recordedBy: currentUser?.username || "admin",
-      studentFallback: targetStudent,
-    });
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await Supabase insertion/update
+      await cloudRecordExamGrade({
+        barcode,
+        studentName: targetStudent?.name || `طالب ${barcode}`,
+        examTitle: lastTitle,
+        score,
+        maxScore,
+        recordedBy: currentUser?.username || "admin",
+      });
+
+      const updated = students.map((s) => {
+        if (s.barcode === barcode) {
+          return {
+            ...s,
+            lastExamTitle: lastTitle,
+            lastExamScore: lastScore,
+            points: newPoints,
+            totalExamScores: updatedScores,
+          };
+        }
+        return s;
+      });
+      setStudents(updated);
+      saveStudentsData(updated);
+
+      dualSyncExamGrade({
+        barcode,
+        studentName: targetStudent?.name,
+        examTitle: lastTitle,
+        score,
+        maxScore,
+        notes: `تعديل رصد درجة: ${lastTitle} (${lastScore})`,
+        recordedBy: currentUser?.username || "admin",
+        studentFallback: targetStudent,
+      });
+    } catch (err: any) {
+      console.error("[App] Failed to update grade record in cloud:", err);
+      alert(`❌ فشل تعديل الدرجة في السحابة: ${err?.message || "خطأ غير معروف"}`);
+    }
   }, [students, currentUser]);
 
   // Handler: Manage Users
-  const handleAddUser = (newUser: UserAccount) => {
+  const handleAddUser = async (newUser: UserAccount) => {
     const updated = [...usersList, newUser];
     setUsersList(updated);
     saveUsersData(updated);
+    await cloudUpdateUsers(updated);
   };
 
-  const handleUpdateUser = (originalUsername: string, updatedUser: UserAccount) => {
+  const handleUpdateUser = async (originalUsername: string, updatedUser: UserAccount) => {
     const updated = usersList.map((u) =>
       u.username === originalUsername ? updatedUser : u
     );
@@ -1429,16 +1652,18 @@ export default function App() {
     if (currentUser?.username === originalUsername) {
       setCurrentUser(updatedUser);
     }
+    await cloudUpdateUsers(updated);
   };
 
-  const handleDeleteUser = (username: string) => {
+  const handleDeleteUser = async (username: string) => {
     const updated = usersList.filter((u) => u.username !== username);
     setUsersList(updated);
     saveUsersData(updated);
+    await cloudUpdateUsers(updated);
   };
 
   // Handler: Change Password
-  const handleChangePassword = (newPass: string) => {
+  const handleChangePassword = async (newPass: string) => {
     if (!currentUser) return;
     const updated = usersList.map((u) =>
       u.username === currentUser.username ? { ...u, pass: newPass } : u
@@ -1446,13 +1671,15 @@ export default function App() {
     setUsersList(updated);
     saveUsersData(updated);
     setCurrentUser({ ...currentUser, pass: newPass });
+    await cloudUpdateUsers(updated);
   };
 
   // Handler: Update Group Default Price
-  const handleUpdateGroupPrice = (grade: GradeName, newPrice: number) => {
+  const handleUpdateGroupPrice = async (grade: GradeName, newPrice: number) => {
     const updated = { ...groupPrices, [grade]: newPrice };
     setGroupPrices(updated);
     saveGroupPricesData(updated);
+    await cloudUpdateGroupPrices(updated);
   };
 
   // Handlers for WhatsApp Outbox
@@ -1532,6 +1759,7 @@ export default function App() {
             isSyncing={syncStatus.isSyncing}
             hasPendingSync={syncStatus.hasPendingSync}
             isQuotaExceeded={syncStatus.isQuotaExceeded}
+            realtimeStatus={globalRealtimeStatus}
             onManualSync={handleManualSync}
             onOpenMultiDeviceSync={() => setIsMultiDeviceSyncModalOpen(true)}
             unreadPlatformMessagesCount={unreadPlatformMessagesCount}
