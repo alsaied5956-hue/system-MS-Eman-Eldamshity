@@ -280,6 +280,18 @@ export default function App() {
             return nextPayments;
           });
         }
+
+        if (res.attendanceHistory && Object.keys(res.attendanceHistory).length > 0) {
+          setAttendanceHistory((prev) => ({ ...prev, ...res.attendanceHistory }));
+        }
+
+        if (res.groupPrices && Object.keys(res.groupPrices).length > 0) {
+          setGroupPrices(res.groupPrices as any);
+        }
+
+        if (res.usersList && res.usersList.length > 0) {
+          setUsersList(res.usersList);
+        }
       }
     }).catch(() => {});
 

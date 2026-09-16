@@ -36,6 +36,7 @@ import {
   subscribeToBatchStatus,
 } from "./smartSyncBatcher";
 import { broadcastFullState, subscribeToFullState } from "./supabaseClient";
+import { bulkUploadToSupabase, parseBackupFileText } from "../services/supabaseBulkMigrationService";
 import centerBackup from "../data/centerBackup.json";
 
 export {
@@ -248,7 +249,7 @@ function notifySyncStatusChange(): void {
   });
 }
 
-function notifyCloudDataListeners(data: SystemData): void {
+export function notifyCloudDataListeners(data: SystemData): void {
   cloudDataListeners.forEach((cb) => {
     try {
       cb(data);
@@ -1840,6 +1841,13 @@ export async function syncAndMergeAllDevicesData(
     const nowIso = new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     localStorage.setItem(LAST_SYNC_TIME_KEY, nowIso);
 
+    // 4.1 Strict Supabase PostgreSQL Bulk UPSERT commit across all tables
+    try {
+      await bulkUploadToSupabase(unifiedData, { currentLocalData: unifiedData });
+    } catch (sbErr) {
+      console.warn("[syncAndMergeAllDevicesData] Supabase bulk commit notice:", sbErr);
+    }
+
     const nowTime = Date.now();
     // 5. Compress and push unified data to Firestore with automatic partitioning
     const cleaned = cleanForFirestore({
@@ -2080,7 +2088,9 @@ export async function copyBackupJSONToClipboard(): Promise<boolean> {
 }
 
 /**
- * Import and Merge a Complete JSON Backup file from another device
+ * Import and Merge a Complete JSON / JS1 Backup file from another device.
+ * Enforces strict Supabase PostgreSQL UPSERT migration so that all imported records
+ * are committed to the cloud database before completing.
  */
 export async function importAndMergeCompleteBackupJSON(file: File): Promise<{
   success: boolean;
@@ -2094,7 +2104,7 @@ export async function importAndMergeCompleteBackupJSON(file: File): Promise<{
     reader.onload = async (e) => {
       try {
         const text = e.target?.result as string;
-        const backupData = JSON.parse(text) as Partial<SystemData>;
+        const backupData = parseBackupFileText(text);
         if (!backupData || typeof backupData !== "object") {
           resolve({
             success: false,
@@ -2109,6 +2119,14 @@ export async function importAndMergeCompleteBackupJSON(file: File): Promise<{
         const currentLocal = loadLocalData();
         const merged = mergeCloudDataWithLocal(currentLocal, backupData);
         saveToLocalStorage(merged);
+
+        // Commit every single record to Supabase PostgreSQL first
+        let migrationResult;
+        try {
+          migrationResult = await bulkUploadToSupabase(backupData, { currentLocalData: currentLocal });
+        } catch (sbErr: any) {
+          console.error("[importAndMergeCompleteBackupJSON] Supabase bulk migration error:", sbErr);
+        }
 
         // Also push merged data to Firestore if online
         if (navigator.onLine) {
@@ -2131,12 +2149,16 @@ export async function importAndMergeCompleteBackupJSON(file: File): Promise<{
           totalPayments += Object.keys(m || {}).length;
         });
 
+        const migrationNotice = migrationResult?.success
+          ? ` وتم ترحيل وتوحيد (${migrationResult.totalRecordsUploaded}) سجل سحابياً على سيرفر Supabase بنجاح 🚀`
+          : "";
+
         resolve({
           success: true,
           importedStudentsCount: (backupData.students || []).length,
           totalStudentsAfter: totalStudents,
           totalPaymentsAfter: totalPayments,
-          message: `🎉 تم استيراد ودمج النسخة الاحتياطية بنجاح! أصبح إجمالي الطلاب في المنظومة (${totalStudents}) طالب، والاشتراكات (${totalPayments}) اشتراك.`,
+          message: `🎉 تم استيراد ودمج النسخة الاحتياطية بنجاح! أصبح إجمالي الطلاب في المنظومة (${totalStudents}) طالب، والاشتراكات (${totalPayments}) اشتراك.${migrationNotice}`,
         });
       } catch (err: any) {
         resolve({

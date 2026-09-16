@@ -532,7 +532,7 @@ export function subscribeToMultiDevicePong(
 // ------------------------------------------------------------------------
 
 // In-memory barcode to student_id cache to avoid redundant network lookups
-const barcodeToIdCache = new Map<string, string>();
+export const barcodeToIdCache = new Map<string, string>();
 
 export async function getStudentIdByBarcode(barcode: string): Promise<string | null> {
   const b = String(barcode).trim();
@@ -1050,13 +1050,17 @@ if (typeof window !== "undefined") {
 export interface SupabaseDirectoryFetchResult {
   students: any[];
   attendanceToday: Record<string, string>;
+  attendanceHistory?: Record<string, Record<string, string>>;
   payments: Record<string, Record<string, any>>;
+  groupPrices?: Record<string, number>;
+  usersList?: any[];
   count: number;
 }
 
 /**
- * Fetch student directory, today's attendance logs, and payments directly from Supabase
- * Runs once on application boot to populate memory & IndexedDB cache.
+ * Fetch authoritative student directory, attendance logs (today + history),
+ * payments, exam grades, and system configs directly from Supabase PostgreSQL.
+ * Runs on application boot across all devices to guarantee a single cloud source of truth.
  */
 export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirectoryFetchResult | null> {
   try {
@@ -1084,27 +1088,11 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
       return {
         students: [],
         attendanceToday: {},
+        attendanceHistory: {},
         payments: {},
         count: 0,
       };
     }
-
-    const mappedStudents = allStudentsRows.map((row) => ({
-      id: row.id,
-      barcode: String(row.barcode).trim(),
-      name: row.name || "طالب بدون اسم",
-      phone: String(row.phone || ""),
-      parentPhone: String(row.parent_phone || row.phone || ""),
-      groupGrade: row.grade || "الصف الرابع الابتدائي",
-      groupDays: row.group_days || "سبت - إثنين - أربعاء",
-      customMonthlyFee: Number(row.monthly_fee) || undefined,
-      discountReason: row.notes || undefined,
-      points: 0,
-      totalAttendanceDays: 0,
-      totalAbsentDays: 0,
-      totalExamScores: [],
-      createdAt: row.created_at || new Date().toISOString(),
-    }));
 
     allStudentsRows.forEach((row) => {
       if (row.id && row.barcode) {
@@ -1114,18 +1102,89 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
 
     const todayKey = getTodayDateKey();
     const attendanceToday: Record<string, string> = {};
-    const { data: todayLogs, error: logErr } = await supabase
-      .from("attendance_logs")
-      .select("barcode, status")
-      .eq("date_key", todayKey);
+    const attendanceHistory: Record<string, Record<string, string>> = {};
+    const studentAttendanceCounts = new Map<string, { present: number; absent: number }>();
 
-    if (!logErr && Array.isArray(todayLogs)) {
-      todayLogs.forEach((l) => {
-        if (l.barcode) {
-          attendanceToday[String(l.barcode).trim()] = l.status;
+    // Fetch all attendance logs to construct complete history
+    const { data: allLogs, error: logErr } = await supabase
+      .from("attendance_logs")
+      .select("barcode, date_key, status");
+
+    if (!logErr && Array.isArray(allLogs)) {
+      allLogs.forEach((l) => {
+        if (l.barcode && l.date_key) {
+          const b = String(l.barcode).trim();
+          if (!attendanceHistory[l.date_key]) {
+            attendanceHistory[l.date_key] = {};
+          }
+          attendanceHistory[l.date_key][b] = l.status;
+
+          if (l.date_key === todayKey) {
+            attendanceToday[b] = l.status;
+          }
+
+          const counts = studentAttendanceCounts.get(b) || { present: 0, absent: 0 };
+          if (l.status === "حضور" || l.status === "تأخير") {
+            counts.present += 1;
+          } else if (l.status === "غياب") {
+            counts.absent += 1;
+          }
+          studentAttendanceCounts.set(b, counts);
         }
       });
     }
+
+    // Fetch homework/exams to populate student test scores
+    const studentExamScores = new Map<string, { scores: number[]; lastTitle?: string; lastScore?: string }>();
+    const { data: hwData } = await supabase
+      .from("homework")
+      .select("student_id, title, score, max_score, date_key")
+      .order("created_at", { ascending: true });
+
+    // Reverse lookup map from student_id to barcode
+    const idToBarcodeMap = new Map<string, string>();
+    allStudentsRows.forEach((r) => {
+      if (r.id && r.barcode) idToBarcodeMap.set(r.id, String(r.barcode).trim());
+    });
+
+    if (Array.isArray(hwData)) {
+      hwData.forEach((hw) => {
+        const b = idToBarcodeMap.get(hw.student_id);
+        if (b && hw.score !== null && hw.score !== undefined) {
+          const current = studentExamScores.get(b) || { scores: [] };
+          const pct = hw.max_score > 0 ? Math.round((hw.score / hw.max_score) * 100) : Number(hw.score);
+          current.scores.push(pct);
+          current.lastTitle = hw.title;
+          current.lastScore = `${hw.score}/${hw.max_score || 100}`;
+          studentExamScores.set(b, current);
+        }
+      });
+    }
+
+    const mappedStudents = allStudentsRows.map((row) => {
+      const b = String(row.barcode).trim();
+      const counts = studentAttendanceCounts.get(b);
+      const examInfo = studentExamScores.get(b);
+
+      return {
+        id: row.id,
+        barcode: b,
+        name: row.name || "طالب بدون اسم",
+        phone: String(row.phone || ""),
+        parentPhone: String(row.parent_phone || row.phone || ""),
+        groupGrade: row.grade || "الصف الرابع الابتدائي",
+        groupDays: row.group_days || "سبت - إثنين - أربعاء",
+        customMonthlyFee: Number(row.monthly_fee) || undefined,
+        discountReason: row.notes || undefined,
+        points: (counts?.present || 0) * 10,
+        totalAttendanceDays: counts?.present || 0,
+        totalAbsentDays: counts?.absent || 0,
+        totalExamScores: examInfo?.scores || [],
+        lastExamTitle: examInfo?.lastTitle,
+        lastExamScore: examInfo?.lastScore,
+        createdAt: row.created_at || new Date().toISOString(),
+      };
+    });
 
     const paymentsMap: Record<string, Record<string, any>> = {};
     const { data: payRows, error: payErr } = await supabase
@@ -1153,10 +1212,27 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
       });
     }
 
+    // Fetch system configs
+    let groupPrices: Record<string, number> | undefined;
+    let usersList: any[] | undefined;
+    const { data: cfgData } = await supabase.from("system_configs").select("*");
+    if (Array.isArray(cfgData)) {
+      cfgData.forEach((row) => {
+        if (row.id === "group_prices" && row.config_value) {
+          groupPrices = row.config_value;
+        } else if (row.id === "users" && Array.isArray(row.config_value)) {
+          usersList = row.config_value;
+        }
+      });
+    }
+
     return {
       students: mappedStudents,
       attendanceToday,
+      attendanceHistory,
       payments: paymentsMap,
+      groupPrices,
+      usersList,
       count: mappedStudents.length,
     };
   } catch (err) {

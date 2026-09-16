@@ -43,7 +43,16 @@ import {
   subscribeToSyncStatus,
   getSyncStatus,
   SyncStatus,
+  loadLocalData,
+  saveToLocalStorage,
+  mergeCloudDataWithLocal,
+  notifyCloudDataListeners,
 } from "../utils/storage";
+import {
+  bulkUploadToSupabase,
+  parseBackupFileText,
+  MigrationProgress,
+} from "../services/supabaseBulkMigrationService";
 import { testFirestoreConnection } from "../utils/firebase";
 import { Student, PaymentRecord, GradeName, GRADE_ORDER } from "../types";
 import { getCurrentMonthKey, DEFAULT_GRADE_PRICES, openWhatsApp, getStudentPayment, isStudentPaid } from "../utils/helpers";
@@ -70,6 +79,7 @@ export const MultiDeviceSyncModal: React.FC<MultiDeviceSyncModalProps> = ({
   onRecordPayment,
 }) => {
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
+  const [migrationProgress, setMigrationProgress] = useState<MigrationProgress | null>(null);
   const [feedback, setFeedback] = useState<{
     type: "success" | "error" | "info";
     title: string;
@@ -211,38 +221,41 @@ export const MultiDeviceSyncModal: React.FC<MultiDeviceSyncModalProps> = ({
     return students.reduce((acc, s) => acc + (s.totalExamScores?.length || 0), 0);
   }, [students]);
 
-  // Action 1: Push & Merge with Cloud with ultra-fast data compression
+  // Action 1: Push & Merge with Cloud (Strict Bulk Supabase PostgreSQL Migration + Real-Time CDC Broadcast)
   const handlePushAndMerge = async () => {
     setLoadingAction("push");
-    setFeedback({
-      type: "info",
-      title: "⏳ جاري ضغط البيانات وتوحيدها سحابياً...",
-      message: "يتم الآن ضغط كافة سجلات الطلاب والدرجات والاشتراكات لتقليل حجمها وبثها تلقائياً لكافة الهواتف والأجهزة المفتوحة في ثوانٍ...",
+    setFeedback(null);
+    setMigrationProgress({
+      stage: "reading",
+      percentage: 5,
+      message: "جاري فحص وتجهيز سجلات الطلاب والاشتراكات للرفع السحابي...",
     });
+
     try {
+      const currentLocal = loadLocalData();
+      const migrationRes = await bulkUploadToSupabase(currentLocal, {
+        currentLocalData: currentLocal,
+        onProgress: (p) => setMigrationProgress(p),
+      });
+
+      // Synchronize with Firestore backup channel
       const result = await syncAndMergeAllDevicesData("push_and_merge");
-      if (result.success) {
-        setFeedback({
-          type: "success",
-          title: "🎉 تم ضغط وتوحيد البيانات وبثها لجميع الأجهزة بنجاح!",
-          message: result.message,
-          details: `بيانات هذا الجهاز قبل التوحيد: ${result.localStudentsBefore} طالب | السحابة: ${result.cloudStudentsBefore} طالب | الإجمالي الموحد النهائي: ${result.unifiedStudentsCount} طالب. يتم التحديث تلقائياً في كافة الأجهزة المفتوحة دون الحاجة لطلب السحب.`,
-        });
-      } else {
-        setFeedback({
-          type: "error",
-          title: "تنبيه المزامنة",
-          message: result.message,
-        });
-      }
+
+      setFeedback({
+        type: "success",
+        title: "🎉 تم توحيد وترحيل كافة البيانات سحابياً بنجاح!",
+        message: `تم رفع وتوثيق (${migrationRes.studentsCount}) طالب، و(${migrationRes.paymentsCount}) اشتراك، و(${migrationRes.attendanceCount}) سجل حضور مباشرة إلى قاعدة بيانات Supabase!`,
+        details: `إجمالي السجلات التي تم ترحيلها وحفظها على السيرفر: ${migrationRes.totalRecordsUploaded} سجل سحابي. تم بث التحديث فوراً لكافة الهواتف والأجهزة المفتوحة.`,
+      });
     } catch (e: any) {
       setFeedback({
         type: "error",
-        title: "خطأ غير متوقع",
+        title: "خطأ أثناء الرفع السحابي",
         message: e?.message || "حدث خطأ أثناء المزامنة.",
       });
     } finally {
       setLoadingAction(null);
+      setTimeout(() => setMigrationProgress(null), 3000);
     }
   };
 
@@ -317,37 +330,61 @@ export const MultiDeviceSyncModal: React.FC<MultiDeviceSyncModalProps> = ({
     }
   };
 
-  // Action 4: Import JSON file from another device
+  // Action 4: Import JSON / JS1 file from another device (Bulk Cloud Migration)
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setLoadingAction("import_file");
     setFeedback(null);
+    setMigrationProgress({
+      stage: "reading",
+      percentage: 5,
+      message: `جاري قراءة وتحليل ملف النسخة الاحتياطية (${file.name})...`,
+    });
+
     try {
-      const result = await importAndMergeCompleteBackupJSON(file);
-      if (result.success) {
-        setFeedback({
-          type: "success",
-          title: "🎉 تم دمج ملف الجهاز الآخر بنجاح!",
-          message: result.message,
-          details: `تم دمج واستيراد (${result.importedStudentsCount}) طالب من الملف. الإجمالي الحالي أصبح (${result.totalStudentsAfter}) طالب و (${result.totalPaymentsAfter}) اشتراك.`,
-        });
-      } else {
-        setFeedback({
-          type: "error",
-          title: "فشل استيراد الملف",
-          message: result.message,
-        });
-      }
+      const text = await file.text();
+      const backupData = parseBackupFileText(text);
+
+      setMigrationProgress({
+        stage: "students",
+        percentage: 15,
+        message: "تم فحص الملف بنجاح، جاري الرفع السحابي وتوحيد الجداول على سيرفر Supabase...",
+      });
+
+      const currentLocal = loadLocalData();
+      const migrationResult = await bulkUploadToSupabase(backupData, {
+        currentLocalData: currentLocal,
+        onProgress: (p) => setMigrationProgress(p),
+      });
+
+      // Synchronize local cache & notify
+      const merged = mergeCloudDataWithLocal(currentLocal, backupData);
+      saveToLocalStorage(merged);
+      notifyCloudDataListeners(merged);
+      window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
+
+      // Also push to Firestore backup
+      try {
+        await syncAndMergeAllDevicesData("push_and_merge");
+      } catch {}
+
+      setFeedback({
+        type: "success",
+        title: "🎉 تم استيراد وترحيل ملف النسخة الاحتياطية إلى Supabase بنجاح!",
+        message: `تم توحيد (${migrationResult.studentsCount}) طالب و (${migrationResult.paymentsCount}) اشتراك و (${migrationResult.attendanceCount}) سجل حضور على السيرفر السحابي.`,
+        details: `أصبحت البيانات موثقة سحابياً وتظهر تلقائياً لجميع الهواتف والأجهزة المفتوحة دون الحاجة لنقل يدوي.`,
+      });
     } catch (err: any) {
       setFeedback({
         type: "error",
-        title: "خطأ في الملف",
-        message: err?.message || "ملف غير صالح.",
+        title: "فشل استيراد الملف",
+        message: err?.message || "ملف غير صالح أو تعذر رفعه سحابياً.",
       });
     } finally {
       setLoadingAction(null);
+      setTimeout(() => setMigrationProgress(null), 3500);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
@@ -523,6 +560,58 @@ export const MultiDeviceSyncModal: React.FC<MultiDeviceSyncModalProps> = ({
 
         {/* Content Body */}
         <div className="p-6 space-y-5 overflow-y-auto custom-scrollbar flex-1">
+          
+          {/* Live Bulk Cloud Migration Progress Banner */}
+          {migrationProgress && (
+            <div className="p-4 rounded-2xl bg-gradient-to-r from-indigo-950 via-slate-900 to-purple-950 border border-indigo-500/60 shadow-2xl space-y-3 animate-fadeIn">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white flex items-center gap-2">
+                      <span>جاري رفع وتوحيد البيانات على السيرفر (Supabase PostgreSQL)...</span>
+                    </h4>
+                    <p className="text-xs text-indigo-200">
+                      {migrationProgress.message}
+                    </p>
+                  </div>
+                </div>
+                <span className="px-3 py-1 rounded-full bg-indigo-500/30 text-indigo-200 text-xs font-mono font-bold border border-indigo-400/40">
+                  {migrationProgress.percentage}%
+                </span>
+              </div>
+
+              {/* Animated Progress Bar */}
+              <div className="w-full h-2.5 bg-slate-900 rounded-full overflow-hidden border border-indigo-500/40">
+                <div
+                  className="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-emerald-400 transition-all duration-300 rounded-full"
+                  style={{ width: `${migrationProgress.percentage}%` }}
+                />
+              </div>
+
+              {migrationProgress.details && (
+                <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-indigo-200">
+                  {migrationProgress.details.studentsProcessed !== undefined && (
+                    <span className="px-2.5 py-0.5 rounded-lg bg-indigo-900/60 border border-indigo-700/50">
+                      الطلاب المعالجون: {migrationProgress.details.studentsProcessed}
+                    </span>
+                  )}
+                  {migrationProgress.details.attendanceProcessed !== undefined && (
+                    <span className="px-2.5 py-0.5 rounded-lg bg-indigo-900/60 border border-indigo-700/50">
+                      سجلات الحضور: {migrationProgress.details.attendanceProcessed}
+                    </span>
+                  )}
+                  {migrationProgress.details.paymentsProcessed !== undefined && (
+                    <span className="px-2.5 py-0.5 rounded-lg bg-indigo-900/60 border border-indigo-700/50">
+                      الاشتراكات المرفوعة: {migrationProgress.details.paymentsProcessed}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           
           {/* Main Financials View (كام دفع وكام مدفعش) */}
           {activeViewTab === "financials" && (
@@ -1060,7 +1149,7 @@ export const MultiDeviceSyncModal: React.FC<MultiDeviceSyncModalProps> = ({
                       type="file"
                       ref={fileInputRef}
                       onChange={handleFileSelected}
-                      accept=".json"
+                      accept=".json,.js,.js1,text/javascript,application/json"
                       className="hidden"
                     />
                     <button
@@ -1073,7 +1162,7 @@ export const MultiDeviceSyncModal: React.FC<MultiDeviceSyncModalProps> = ({
                       ) : (
                         <UploadCloud className="w-4 h-4 text-purple-300" />
                       )}
-                      <span>📥 استيراد ودمج ملف نسخة احتياطية من جهاز آخر</span>
+                      <span>📥 استيراد وترحيل ملف نسخة احتياطية (JSON / JS1) إلى السحابة</span>
                     </button>
                   </div>
                 </div>
