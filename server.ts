@@ -4,6 +4,7 @@ import fs from "fs";
 import zlib from "zlib";
 import { initializeApp, getApps } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { createServer as createHttpServer } from "http";
 import { createServer as createViteServer } from "vite";
 import {
   analyzeStudentPerformance,
@@ -1310,9 +1311,16 @@ async function startServer() {
   // -------------------------------------------------------------
   // Vite Middleware & SPA Static Asset Serving
   // -------------------------------------------------------------
+  // Share a single HTTP server so Vite's HMR WebSocket rides over the same
+  // (proxied) port instead of Vite's default, un-exposed WS port.
+  const httpServer = createHttpServer(app);
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === "true" ? false : { server: httpServer },
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -1324,7 +1332,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`[Server] Production-ready full-stack server running on http://0.0.0.0:${PORT}`);
   });
 }
