@@ -64,6 +64,7 @@ import {
   RealtimeDeletionPayload,
 } from "./utils/firebaseRealtime";
 import { getPersistentDeviceId, getPersistentDeviceName } from "./utils/deviceClient";
+import { startRealtimeMirror, subscribeToRealtimeMirror, MirrorDelta } from "./utils/realtimeMirror";
 import {
   dualSyncLiveScan,
   dualSyncGroupFinished,
@@ -769,6 +770,215 @@ export default function App() {
       unsubFbAttendanceStatus();
       unsubFbDeletion();
       unsubPing();
+    };
+  }, []);
+
+  // ⚡ Global Postgres Realtime CDC Mirror: authoritative row-level sync across ALL devices.
+  // Applies idempotent delta updates directly from the database write-ahead log so every
+  // connected phone reflects student/payment/attendance/grade changes with no manual refresh.
+  useEffect(() => {
+    const recentDeltas = new Map<string, number>();
+    const isDuplicateDelta = (key: string, windowMs = 1500): boolean => {
+      const now = Date.now();
+      const last = recentDeltas.get(key);
+      if (last && now - last < windowMs) return true;
+      recentDeltas.set(key, now);
+      if (recentDeltas.size > 500) {
+        for (const [k, t] of recentDeltas) {
+          if (now - t > 10000) recentDeltas.delete(k);
+        }
+      }
+      return false;
+    };
+
+    const applyMirrorDelta = (delta: MirrorDelta) => {
+      const { table, type, row, old, barcode } = delta;
+
+      if (table === "students") {
+        if (type === "DELETE") {
+          if (!barcode) return;
+          setStudents((prev) => {
+            const next = prev.filter((s) => String(s.barcode).trim() !== barcode);
+            if (next.length === prev.length) return prev;
+            appStudentsRef.current = next;
+            saveStudentsData(next, barcode);
+            return next;
+          });
+          return;
+        }
+        if (!row || !barcode) return;
+        // Only overwrite DB-backed columns; preserve locally-derived counters
+        // (points, attendance days, exam scores) that don't live in Postgres.
+        const dbFields = {
+          id: row.id,
+          barcode,
+          name: row.name || "طالب بدون اسم",
+          phone: String(row.phone || ""),
+          parentPhone: String(row.parent_phone || row.phone || ""),
+          groupGrade: (row.grade || "الصف الرابع الابتدائي") as Student["groupGrade"],
+          groupDays: (row.group_days || "سبت - إثنين - أربعاء") as Student["groupDays"],
+          customMonthlyFee: row.monthly_fee != null ? Number(row.monthly_fee) : undefined,
+          discountReason: row.notes ?? undefined,
+        };
+        setStudents((prev) => {
+          const idx = prev.findIndex((s) => String(s.barcode).trim() === barcode);
+          let next: Student[];
+          if (idx === -1) {
+            next = [
+              {
+                ...dbFields,
+                points: 0,
+                totalAttendanceDays: 0,
+                totalAbsentDays: 0,
+                totalExamScores: [],
+                createdAt: row.created_at || new Date().toISOString(),
+              } as Student,
+              ...prev,
+            ];
+          } else {
+            next = prev.slice();
+            next[idx] = { ...prev[idx], ...dbFields };
+          }
+          appStudentsRef.current = next;
+          saveStudentsData(next);
+          return next;
+        });
+        return;
+      }
+
+      if (table === "payments") {
+        if (!barcode) return;
+        if (type === "DELETE") {
+          const monthKey = old?.month_key;
+          if (!monthKey) return;
+          setPayments((prev) => {
+            if (!prev[monthKey] || !prev[monthKey][barcode]) return prev;
+            const updated = { ...prev };
+            const m = { ...updated[monthKey] };
+            delete m[barcode];
+            updated[monthKey] = m;
+            paymentsRef.current = updated;
+            savePaymentsData(updated, `${monthKey}_${barcode}`);
+            return updated;
+          });
+          return;
+        }
+        if (!row) return;
+        const monthKey = row.month_key;
+        if (!monthKey) return;
+        if (isDuplicateDelta(`pay_${row.id}_${row.amount_paid}_${type}`)) return;
+        const pd: string | undefined = row.payment_date;
+        setPayments((prev) => {
+          const updated = { ...prev };
+          const m = { ...(updated[monthKey] || {}) };
+          m[barcode] = {
+            id: row.id,
+            barcode,
+            month: monthKey,
+            monthKey,
+            amount: Number(row.amount_paid) || 0,
+            date: pd ? pd.split("T")[0] : "",
+            time: pd ? pd.split("T")[1]?.slice(0, 5) || "" : "",
+            note: row.notes || "",
+            recordedBy: row.received_by || "admin",
+          };
+          updated[monthKey] = m;
+          paymentsRef.current = updated;
+          savePaymentsData(updated);
+          return updated;
+        });
+        return;
+      }
+
+      if (table === "attendance_logs") {
+        if (!barcode) return;
+        const dateKey = (row?.date_key || old?.date_key) as string | undefined;
+        const todayKey = getTodayKey();
+        if (type === "DELETE") {
+          if (!dateKey) return;
+          setAttendanceToday((prev) => {
+            if (dateKey !== todayKey || !prev[barcode]) return prev;
+            const next = { ...prev };
+            delete next[barcode];
+            attendanceTodayRef.current = next;
+            return next;
+          });
+          setAttendanceHistory((prev) => {
+            if (!prev[dateKey] || !prev[dateKey][barcode]) return prev;
+            const next = { ...prev };
+            const dayMap = { ...next[dateKey] };
+            delete dayMap[barcode];
+            next[dateKey] = dayMap;
+            attendanceHistoryRef.current = next;
+            return next;
+          });
+          return;
+        }
+        if (!row || !dateKey) return;
+        const rawStatus = row.status;
+        const normalized = rawStatus === "تأخير" ? "تأخير" : rawStatus === "غياب" || rawStatus === "غائب" ? "غياب" : "حضور";
+        if (isDuplicateDelta(`att_${barcode}_${dateKey}_${normalized}`)) return;
+        if (dateKey === todayKey) {
+          setAttendanceToday((prev) => {
+            if (prev[barcode] === normalized) return prev;
+            const next = { ...prev, [barcode]: normalized };
+            attendanceTodayRef.current = next;
+            return next;
+          });
+        }
+        setAttendanceHistory((prev) => {
+          const histStatus = normalized === "غياب" ? "غائب" : normalized;
+          if (prev[dateKey]?.[barcode] === histStatus) return prev;
+          const dayMap = { ...(prev[dateKey] || {}), [barcode]: histStatus };
+          const next = { ...prev, [dateKey]: dayMap };
+          attendanceHistoryRef.current = next;
+          return next;
+        });
+        return;
+      }
+
+      if (table === "homework") {
+        // Exam grade rows carry a score; expose them idempotently without
+        // mutating accumulated per-student counters (avoids double counting).
+        if (type !== "DELETE" && row && barcode && row.score != null && row.max_score) {
+          const score = Number(row.score) || 0;
+          const maxScore = Number(row.max_score) || 0;
+          const pct = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+          setStudents((prev) => {
+            const idx = prev.findIndex((s) => String(s.barcode).trim() === barcode);
+            if (idx === -1) return prev;
+            const current = prev[idx];
+            const scoreFormatted = `${score}/${maxScore} (${pct}%)`;
+            if (current.lastExamScore === scoreFormatted && current.lastExamTitle === (row.title || current.lastExamTitle)) {
+              return prev;
+            }
+            const next = prev.slice();
+            next[idx] = { ...current, lastExamTitle: row.title || current.lastExamTitle, lastExamScore: scoreFormatted };
+            appStudentsRef.current = next;
+            return next;
+          });
+        }
+        // Let homework/grade tabs re-pull their own authoritative view.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("realtime-homework-cdc", { detail: { barcode, type, row, old } }));
+        }
+        return;
+      }
+
+      if (table === "parent_accounts" || table === "system_settings") {
+        // No direct in-memory mapping; notify interested screens to refresh.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent(`realtime-${table}-cdc`, { detail: { type, row, old } }));
+        }
+        return;
+      }
+    };
+
+    const unsub = subscribeToRealtimeMirror(applyMirrorDelta);
+    startRealtimeMirror();
+
+    return () => {
+      unsub();
     };
   }, []);
 
