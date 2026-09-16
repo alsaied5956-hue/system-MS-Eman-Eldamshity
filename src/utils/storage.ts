@@ -18,6 +18,7 @@ import {
   markFirestoreQuotaExceeded,
   clearFirestoreQuota,
   safeFirestoreWrite,
+  isBenignFirestoreStreamOrQuota,
 } from "./firebase";
 import { doc, setDoc, getDoc, onSnapshot, writeBatch } from "firebase/firestore";
 import { compressData, decompressData, compactSystemPayload, hydrateSystemPayload } from "./compression";
@@ -2423,10 +2424,13 @@ function ensureActiveSnapshotListener() {
             30000,
             Math.round(1000 * Math.pow(1.5, Math.min(snapshotReconnectAttempts, 6)) + Math.random() * 800)
           );
-          console.warn(
-            `Firestore snapshot listener disconnected, reconnecting in ${jitteredDelay}ms (attempt ${snapshotReconnectAttempts}):`,
-            error
-          );
+          const msg = error?.message || String(error || "");
+          if (!isBenignFirestoreStreamOrQuota(msg)) {
+            console.warn(
+              `Firestore snapshot listener disconnected, reconnecting in ${jitteredDelay}ms (attempt ${snapshotReconnectAttempts}):`,
+              error
+            );
+          }
           if (listenerReconnectTimer) clearTimeout(listenerReconnectTimer);
           listenerReconnectTimer = setTimeout(() => {
             if (cloudDataListeners.length > 0) {

@@ -3,8 +3,14 @@ import path from "path";
 import fs from "fs";
 import zlib from "zlib";
 import { initializeApp, getApps } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot, setLogLevel } from "firebase/firestore";
 import { createServer as createViteServer } from "vite";
+
+try {
+  setLogLevel("silent");
+} catch {
+  // Ignore
+}
 import {
   analyzeStudentPerformance,
   generateSmartNotification,
@@ -54,22 +60,45 @@ export function markServerFirestoreQuotaExceeded(durationMs = 60 * 60 * 1000): v
   serverFirestoreQuotaExceededUntil = Math.max(serverFirestoreQuotaExceededUntil, Date.now() + durationMs);
 }
 
-// 1. Intercept console.error to silence benign Firestore gRPC stream resource exhaustion
+export function isBenignFirestoreStreamOrQuota(str: string): boolean {
+  if (!str || typeof str !== "string") return false;
+  const isFirestore =
+    str.includes("@firebase/firestore") ||
+    str.includes("Firestore") ||
+    str.includes("GrpcConnection");
+  if (!isFirestore) return false;
+
+  return (
+    str.includes("RESOURCE_EXHAUSTED") ||
+    str.includes("resource-exhausted") ||
+    str.includes("Quota limit exceeded") ||
+    str.includes("Free daily write units") ||
+    str.includes("Write' stream") ||
+    str.includes("Disconnecting idle stream") ||
+    str.includes("Timed out waiting for new targets") ||
+    str.includes("RPC 'Listen' stream") ||
+    str.includes("1 CANCELLED") ||
+    str.includes("Code: 1") ||
+    str.includes("idle stream")
+  );
+}
+
+// 1. Intercept console.error to silence benign Firestore gRPC stream resource exhaustion & idle stream disconnects
 const originalConsoleError = console.error;
 console.error = function (...args: any[]) {
   const combinedStr = args
     .map((a) => (typeof a === "string" ? a : a?.message || a?.stack || (typeof a === "object" ? JSON.stringify(a) : "")))
     .join(" ");
 
-  if (
-    (combinedStr.includes("@firebase/firestore") || combinedStr.includes("Firestore")) &&
-    (combinedStr.includes("RESOURCE_EXHAUSTED") ||
+  if (isBenignFirestoreStreamOrQuota(combinedStr)) {
+    if (
+      combinedStr.includes("RESOURCE_EXHAUSTED") ||
       combinedStr.includes("resource-exhausted") ||
       combinedStr.includes("Quota limit exceeded") ||
-      combinedStr.includes("Free daily write units") ||
-      combinedStr.includes("Write' stream"))
-  ) {
-    markServerFirestoreQuotaExceeded();
+      combinedStr.includes("Free daily write units")
+    ) {
+      markServerFirestoreQuotaExceeded();
+    }
     return;
   }
 
@@ -80,15 +109,15 @@ console.error = function (...args: any[]) {
 const originalStderrWrite = process.stderr.write.bind(process.stderr);
 (process.stderr as any).write = function (chunk: any, ...rest: any[]) {
   const str = typeof chunk === "string" ? chunk : chunk?.toString() || "";
-  if (
-    str.includes("@firebase/firestore") &&
-    (str.includes("RESOURCE_EXHAUSTED") ||
+  if (isBenignFirestoreStreamOrQuota(str)) {
+    if (
+      str.includes("RESOURCE_EXHAUSTED") ||
       str.includes("resource-exhausted") ||
       str.includes("Quota limit exceeded") ||
-      str.includes("Free daily write units") ||
-      str.includes("Write' stream"))
-  ) {
-    markServerFirestoreQuotaExceeded();
+      str.includes("Free daily write units")
+    ) {
+      markServerFirestoreQuotaExceeded();
+    }
     return true;
   }
   return (originalStderrWrite as any)(chunk, ...rest);
@@ -96,8 +125,11 @@ const originalStderrWrite = process.stderr.write.bind(process.stderr);
 
 // 3. Catch unhandled rejections from background firestore promises
 process.on("unhandledRejection", (reason: any) => {
-  if (isFirestoreQuotaError(reason)) {
-    markServerFirestoreQuotaExceeded();
+  const reasonStr = typeof reason === "string" ? reason : reason?.message || reason?.stack || "";
+  if (isFirestoreQuotaError(reason) || isBenignFirestoreStreamOrQuota(reasonStr)) {
+    if (isFirestoreQuotaError(reason)) {
+      markServerFirestoreQuotaExceeded();
+    }
     return;
   }
   originalConsoleError("Unhandled Rejection:", reason);
@@ -373,7 +405,11 @@ async function syncServerWithFirestore() {
         }
       },
       (err) => {
-        console.warn("[Sync Hub] Firestore snapshot listener warning:", err?.message);
+        const msg = err?.message || String(err || "");
+        if (isBenignFirestoreStreamOrQuota(msg)) {
+          return;
+        }
+        console.warn("[Sync Hub] Firestore snapshot listener warning:", msg);
       }
     );
   } catch (err) {

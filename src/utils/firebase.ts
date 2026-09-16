@@ -153,13 +153,41 @@ export async function safeFirestoreWrite<T>(
   }
 }
 
-// Global filter to suppress console noise when Firestore free tier daily quota is reached
+export function isBenignFirestoreStreamOrQuota(str: string): boolean {
+  if (!str || typeof str !== "string") return false;
+  const isFirestore =
+    str.includes("@firebase/firestore") ||
+    str.includes("Firestore") ||
+    str.includes("GrpcConnection");
+  if (!isFirestore) return false;
+
+  return (
+    str.includes("RESOURCE_EXHAUSTED") ||
+    str.includes("resource-exhausted") ||
+    str.includes("Quota limit exceeded") ||
+    str.includes("Free daily write units") ||
+    str.includes("Write' stream") ||
+    str.includes("Disconnecting idle stream") ||
+    str.includes("Timed out waiting for new targets") ||
+    str.includes("RPC 'Listen' stream") ||
+    str.includes("1 CANCELLED") ||
+    str.includes("Code: 1") ||
+    str.includes("idle stream")
+  );
+}
+
+// Global filter to suppress console noise when Firestore free tier daily quota or idle streams occur
 if (typeof window !== "undefined") {
-  // 1. Intercept unhandled promise rejections originating from Firestore quota limits
+  // 1. Intercept unhandled promise rejections originating from Firestore quota limits or stream cancellation
   window.addEventListener("unhandledrejection", (event) => {
     if (isFirestoreQuotaError(event.reason)) {
       event.preventDefault();
       markFirestoreQuotaExceeded();
+      return;
+    }
+    const reasonStr = String(event.reason?.message || event.reason || "");
+    if (isBenignFirestoreStreamOrQuota(reasonStr)) {
+      event.preventDefault();
     }
   });
 
@@ -170,17 +198,18 @@ if (typeof window !== "undefined") {
       .map((a) => (typeof a === "string" ? a : a?.message || a?.stack || (typeof a === "object" ? JSON.stringify(a) : "")))
       .join(" ");
 
-    if (
-      (combinedStr.includes("@firebase/firestore") || combinedStr.includes("Firestore")) &&
-      (combinedStr.includes("RESOURCE_EXHAUSTED") ||
+    if (isBenignFirestoreStreamOrQuota(combinedStr)) {
+      if (
+        combinedStr.includes("RESOURCE_EXHAUSTED") ||
         combinedStr.includes("resource-exhausted") ||
         combinedStr.includes("Quota limit exceeded") ||
-        combinedStr.includes("Free daily write units"))
-    ) {
-      markFirestoreQuotaExceeded();
-      console.warn(
-        "[Firestore Quota Guard] Firestore daily write quota reached. System is operating seamlessly via Zero-Quota Real-Time Hub."
-      );
+        combinedStr.includes("Free daily write units")
+      ) {
+        markFirestoreQuotaExceeded();
+        console.warn(
+          "[Firestore Quota Guard] Firestore daily write quota reached. System is operating seamlessly via Zero-Quota Real-Time Hub."
+        );
+      }
       return;
     }
 

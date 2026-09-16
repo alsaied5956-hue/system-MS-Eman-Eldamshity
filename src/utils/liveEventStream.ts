@@ -5,6 +5,7 @@ import {
   isFirestoreQuotaActive,
   markFirestoreQuotaExceeded,
   isFirestoreQuotaError,
+  isBenignFirestoreStreamOrQuota,
 } from "./firebase";
 
 export interface LiveAttendanceEvent {
@@ -175,6 +176,10 @@ export function subscribeToLiveEventStream(
       }
     },
     (err) => {
+      const msg = (err as any)?.message || String(err || "");
+      if (isBenignFirestoreStreamOrQuota(msg)) {
+        return;
+      }
       console.warn("Live events stream onSnapshot error:", err);
       if (onError) onError(err);
     }
