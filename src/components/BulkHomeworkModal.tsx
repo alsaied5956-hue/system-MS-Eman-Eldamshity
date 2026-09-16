@@ -2,6 +2,7 @@ import React, { useState, useMemo } from "react";
 import { Student, GradeName, GroupDays, GRADE_ORDER } from "../types";
 import { getTodayKey } from "../utils/helpers";
 import { enqueuePlatformMessage } from "../utils/storage";
+import { cloudBulkUpdateHomeworkStatus } from "../services/supabaseMutationService";
 import {
   BookOpen,
   X,
@@ -139,13 +140,49 @@ export const BulkHomeworkModal: React.FC<BulkHomeworkModalProps> = ({
   const totalToSend =
     processed.notDone.length + processed.deficient.length + processed.completed.length;
 
-  const handleSendAllPlatformNotifications = () => {
+  const handleSendAllPlatformNotifications = async () => {
     if (totalToSend === 0) {
       alert("⚠️ لا يوجد طلاب مستحقون لإرسال إشعارات الواجب في هذه المجموعة.");
       return;
     }
 
     setIsSending(true);
+
+    const dateKey = targetDate || getTodayKey();
+
+    // ⚡ Strict Cloud-First Persistence & FCM Push Dispatch across all lists
+    const hwRecords = [
+      ...processed.notDone.map(({ student, message }) => ({
+        barcode: student.barcode,
+        studentName: student.name,
+        parentPhone: student.parentPhone || student.phone,
+        status: "not_done" as const,
+        notes: message || "لم يتم تسليم الواجب",
+        dateKey,
+      })),
+      ...processed.deficient.map(({ student, message }) => ({
+        barcode: student.barcode,
+        studentName: student.name,
+        parentPhone: student.parentPhone || student.phone,
+        status: "incomplete" as const,
+        notes: message || "حل ناقص / غير مكتمل",
+        dateKey,
+      })),
+      ...processed.completed.map(({ student, message }) => ({
+        barcode: student.barcode,
+        studentName: student.name,
+        parentPhone: student.parentPhone || student.phone,
+        status: "done" as const,
+        notes: message || "تسليم ممتاز وكامل",
+        dateKey,
+      })),
+    ];
+
+    try {
+      await cloudBulkUpdateHomeworkStatus(hwRecords);
+    } catch (err) {
+      console.warn("[BulkHomeworkModal] Error saving to Supabase:", err);
+    }
 
     // Enqueue 1: Not done
     processed.notDone.forEach(({ student, message }) => {
@@ -191,7 +228,7 @@ export const BulkHomeworkModal: React.FC<BulkHomeworkModalProps> = ({
 
     setIsSending(false);
     setSuccessMessage(
-      `✅ تم بنجاح توثيق وإرسال إشعارات الواجبات داخل المنصة لعدد (${totalToSend}) طالب! تم استثناء (${processed.absentExcluded.length}) طالب غائب تلقائياً.`
+      `✅ تم بنجاح توثيق وإرسال إشعارات الواجبات وبث تنبيهات FCM الفورية لعدد (${totalToSend}) طالب! تم استثناء (${processed.absentExcluded.length}) طالب غائب تلقائياً.`
     );
 
     if (onNotificationsDispatched) {

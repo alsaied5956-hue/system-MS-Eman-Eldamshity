@@ -14,6 +14,16 @@
 import { supabase, getStudentIdByBarcode, ensureStudentInSupabase, getTodayDateKey } from "../utils/supabaseClient";
 import { Student, PaymentRecord, UserAccount, GradeName, GroupDays } from "../types";
 import { getPersistentDeviceId } from "../utils/deviceClient";
+import {
+  triggerAttendancePresentNotification,
+  triggerAttendanceLateNotification,
+  triggerAttendanceAbsentNotification,
+  triggerExamGradeNotification,
+  triggerHomeworkStatusNotification,
+  triggerPaymentReceiptNotification,
+  triggerProfileUpdateNotification,
+  triggerSupervisorChatNotification,
+} from "./fcmPushDispatcher";
 
 export interface MutationResult<T> {
   success: boolean;
@@ -143,6 +153,8 @@ export async function cloudUpdateStudent(
       console.error("[MutationService] Error updating student by id:", error);
       throw new Error(`فشل تحديث بيانات الطالب: ${error.message}`);
     }
+    // High-Priority FCM Push: Student profile updated
+    triggerProfileUpdateNotification(updatedStudent).catch(() => {});
     return { ...updatedStudent, id: data?.id || studentId };
   } else {
     const { data, error } = await query
@@ -155,6 +167,8 @@ export async function cloudUpdateStudent(
       console.error("[MutationService] Error updating student by barcode:", error);
       throw new Error(`فشل تحديث بيانات الطالب: ${error.message}`);
     }
+    // High-Priority FCM Push: Student profile updated
+    triggerProfileUpdateNotification(updatedStudent).catch(() => {});
     return { ...updatedStudent, id: data?.id };
   }
 }
@@ -269,6 +283,18 @@ export async function cloudRecordAttendance(
     throw new Error(`فشل تسجيل الحضور في السحابة: ${error.message}`);
   }
 
+  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger immediately after cloud persistence
+  const timeDisplay = timeIso
+    ? new Date(timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" })
+    : new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
+  const studentInfo = studentFallback || { barcode: b, name: studentName };
+
+  if (status === "تأخير") {
+    triggerAttendanceLateNotification(studentInfo, timeDisplay, dateKey).catch(() => {});
+  } else {
+    triggerAttendancePresentNotification(studentInfo, timeDisplay, dateKey).catch(() => {});
+  }
+
   return { barcode: b, status, timeIso };
 }
 
@@ -351,6 +377,16 @@ export async function cloudFinishGroupAttendance(
     }
   }
 
+  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger for all absents & lates after cloud commit
+  for (const b of absentBarcodes) {
+    const sObj = studentMap.get(b) || { barcode: b, name: `طالب ${b}` };
+    triggerAttendanceAbsentNotification(sObj, dateKey).catch(() => {});
+  }
+  for (const b of lateBarcodes) {
+    const sObj = studentMap.get(b) || { barcode: b, name: `طالب ${b}` };
+    triggerAttendanceLateNotification(sObj, "04:30 م", dateKey).catch(() => {});
+  }
+
   return { dateKey, absentBarcodes, lateBarcodes, presentBarcodes };
 }
 
@@ -359,10 +395,15 @@ export async function cloudChangeAttendanceStatus(
   dateKey: string,
   newStatus: string,
   studentName: string,
-  scannedBy: string = "admin"
+  scannedBy: string = "admin",
+  studentFallback?: Partial<Student>
 ): Promise<{ barcode: string; dateKey: string; status: string }> {
   const b = String(barcode).trim();
-  const sId = await ensureStudentInSupabase(b, { name: studentName });
+  const sId = await ensureStudentInSupabase(b, {
+    name: studentName,
+    parentPhone: studentFallback?.parentPhone || studentFallback?.phone,
+    groupGrade: studentFallback?.groupGrade,
+  });
   if (!sId) throw new Error("تعذر تحديد معرف الطالب");
 
   const normalizedStatus: "حضور" | "تأخير" | "غياب" =
@@ -390,6 +431,20 @@ export async function cloudChangeAttendanceStatus(
   if (error) {
     console.error("[MutationService] Error changing attendance status:", error);
     throw new Error(`فشل تعديل حالة الحضور في السحابة: ${error.message}`);
+  }
+
+  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger corresponding attendance event
+  const studentInfo = {
+    barcode: b,
+    name: studentName,
+    parentPhone: studentFallback?.parentPhone || studentFallback?.phone,
+  };
+  if (normalizedStatus === "حضور") {
+    triggerAttendancePresentNotification(studentInfo, undefined, dateKey).catch(() => {});
+  } else if (normalizedStatus === "تأخير") {
+    triggerAttendanceLateNotification(studentInfo, undefined, dateKey).catch(() => {});
+  } else if (normalizedStatus === "غياب") {
+    triggerAttendanceAbsentNotification(studentInfo, dateKey).catch(() => {});
   }
 
   return { barcode: b, dateKey, status: normalizedStatus };
@@ -455,6 +510,15 @@ export async function cloudRecordPayment(record: {
     throw new Error(`فشل تسجيل الدفع في السحابة: ${error.message}`);
   }
 
+  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger Payment Receipt to parent
+  triggerPaymentReceiptNotification(
+    record.studentFallback || { barcode: b, name: `طالب ${b}` },
+    record.amount,
+    record.monthKey,
+    record.date || getTodayDateKey(),
+    data?.id ? String(data.id).slice(0, 8) : undefined
+  ).catch(() => {});
+
   return {
     id: data?.id,
     barcode: b,
@@ -515,6 +579,15 @@ export async function cloudUpdatePayment(record: {
     throw new Error(`فشل تحديث السداد في السحابة: ${error.message}`);
   }
 
+  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger Payment Receipt to parent
+  triggerPaymentReceiptNotification(
+    record.studentFallback || { barcode: b, name: `طالب ${b}` },
+    record.newAmount,
+    record.newMonthKey,
+    record.newDate || getTodayDateKey(),
+    data?.id ? String(data.id).slice(0, 8) : undefined
+  ).catch(() => {});
+
   return {
     id: data?.id,
     barcode: b,
@@ -570,9 +643,14 @@ export async function cloudRecordExamGrade(record: {
   studentName?: string;
   recordedBy?: string;
   dateKey?: string;
+  studentFallback?: Partial<Student>;
 }): Promise<{ barcode: string; examTitle: string; score: number; maxScore: number; percentage: number }> {
   const b = String(record.barcode).trim();
-  const sId = await ensureStudentInSupabase(b, { name: record.studentName });
+  const sId = await ensureStudentInSupabase(b, {
+    name: record.studentName,
+    parentPhone: record.studentFallback?.parentPhone || record.studentFallback?.phone,
+    groupGrade: record.studentFallback?.groupGrade,
+  });
   if (!sId) throw new Error(`تعذر العثور على سجل الطالب (${b}) لرصد الدرجة`);
 
   const pct = Math.round((record.score / record.maxScore) * 100);
@@ -593,12 +671,156 @@ export async function cloudRecordExamGrade(record: {
     throw new Error(`فشل حفظ درجة الامتحان في السحابة: ${error.message}`);
   }
 
+  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger Exam Grade to parent
+  triggerExamGradeNotification(
+    {
+      barcode: b,
+      name: record.studentName || `طالب ${b}`,
+      parentPhone: record.studentFallback?.parentPhone || record.studentFallback?.phone,
+      groupGrade: record.studentFallback?.groupGrade,
+    },
+    record.examTitle,
+    record.score,
+    record.maxScore,
+    dateKey
+  ).catch(() => {});
+
   return {
     barcode: b,
     examTitle: record.examTitle,
     score: record.score,
     maxScore: record.maxScore,
     percentage: pct,
+  };
+}
+
+/**
+ * ⚡ HOMEWORK STATUS MUTATIONS (Cloud-First & FCM Triggered)
+ */
+export async function cloudUpdateHomeworkStatus(record: {
+  barcode: string;
+  dateKey: string;
+  status: "done" | "incomplete" | "not_done";
+  notes?: string;
+  studentFallback?: Student | { barcode: string; name: string; parentPhone?: string };
+}): Promise<{ barcode: string; status: string }> {
+  const b = String(record.barcode).trim();
+  const sId = await ensureStudentInSupabase(b, record.studentFallback);
+  if (!sId) throw new Error(`تعذر العثور على سجل الطالب (${b}) لتسجيل الواجب`);
+
+  const { error } = await supabase.from("homework").insert({
+    student_id: sId,
+    date_key: record.dateKey,
+    title: "واجب الحصة",
+    status: record.status,
+    notes: record.notes || (record.status === "done" ? "تسليم ممتاز وكامل" : record.status === "incomplete" ? "حل ناقص" : "لم يتم التسليم"),
+  });
+
+  if (error) {
+    console.error("[MutationService] Error updating homework status:", error);
+    throw new Error(`فشل تحديث حالة الواجب في السحابة: ${error.message}`);
+  }
+
+  // High-Priority FCM Push: Homework status update
+  await triggerHomeworkStatusNotification(
+    record.studentFallback || { barcode: b, name: `طالب ${b}` },
+    record.status,
+    record.notes,
+    record.dateKey
+  );
+
+  return { barcode: b, status: record.status };
+}
+
+export async function cloudBulkUpdateHomeworkStatus(
+  records: Array<{
+    barcode: string;
+    studentName: string;
+    parentPhone?: string;
+    status: "done" | "incomplete" | "not_done";
+    notes?: string;
+    dateKey: string;
+  }>
+): Promise<{ count: number }> {
+  if (!records || records.length === 0) return { count: 0 };
+
+  const rowsToInsert: any[] = [];
+  for (const item of records) {
+    const sId = await ensureStudentInSupabase(item.barcode, { name: item.studentName, parentPhone: item.parentPhone });
+    if (sId) {
+      rowsToInsert.push({
+        student_id: sId,
+        date_key: item.dateKey,
+        title: "واجب الحصة",
+        status: item.status,
+        notes: item.notes || (item.status === "done" ? "تسليم ممتاز وكامل" : item.status === "incomplete" ? "حل ناقص" : "لم يتم التسليم"),
+      });
+    }
+  }
+
+  if (rowsToInsert.length > 0) {
+    const { error } = await supabase.from("homework").insert(rowsToInsert);
+    if (error) {
+      console.error("[MutationService] Error bulk updating homework:", error);
+      throw new Error(`فشل تحديث الواجبات جماعياً في السحابة: ${error.message}`);
+    }
+  }
+
+  // Trigger FCM push notification for each student
+  for (const item of records) {
+    triggerHomeworkStatusNotification(
+      { barcode: item.barcode, name: item.studentName, parentPhone: item.parentPhone },
+      item.status,
+      item.notes,
+      item.dateKey
+    ).catch(() => {});
+  }
+
+  return { count: records.length };
+}
+
+/**
+ * ⚡ SUPERVISOR CHAT REPLY MUTATION (Cloud-First & FCM Triggered)
+ */
+export async function cloudSendChatMessage(record: {
+  barcode: string;
+  message: string;
+  senderName?: string;
+  studentFallback?: Student | { barcode: string; name: string; parentPhone?: string };
+}): Promise<{ id?: string; barcode: string; message: string }> {
+  const b = String(record.barcode).trim();
+  const sId = await ensureStudentInSupabase(b, record.studentFallback);
+  if (!sId) throw new Error(`تعذر العثور على سجل الطالب (${b}) لإرسال الرسالة`);
+
+  const sender = record.senderName || "إشراف المنظومة";
+  const { data, error } = await supabase
+    .from("chat_messages")
+    .insert({
+      student_id: sId,
+      sender_type: "supervisor",
+      sender_name: sender,
+      message: record.message.trim(),
+      status: "sent",
+      created_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    console.error("[MutationService] Error inserting chat message in Supabase:", error);
+  }
+
+  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger Supervisor Chat to linked parent
+  await triggerSupervisorChatNotification(
+    record.studentFallback || { barcode: b, name: `طالب ${b}` },
+    record.message.trim(),
+    sender
+  );
+
+  return {
+    id: data?.id,
+    barcode: b,
+    message: record.message.trim(),
   };
 }
 

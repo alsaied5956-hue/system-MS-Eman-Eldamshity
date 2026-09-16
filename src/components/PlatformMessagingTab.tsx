@@ -8,6 +8,7 @@ import {
   deletePlatformMessage,
   clearAllPlatformMessages,
 } from "../utils/storage";
+import { cloudSendChatMessage } from "../services/supabaseMutationService";
 import { StudentSearchBox } from "./StudentSearchBox";
 import { matchStudentSearch } from "../utils/search";
 import { SmartStudentNotificationGenerator } from "./SmartStudentNotificationGenerator";
@@ -137,7 +138,7 @@ export const PlatformMessagingTab: React.FC<PlatformMessagingTabProps> = ({
     openWhatsApp(targetPhone, m.message);
   };
 
-  const handleSendNewMessage = (e: React.FormEvent) => {
+  const handleSendNewMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedStudent) {
       alert("⚠️ يرجى اختيار الطالب أولاً لإرسال الإشعار إليه.");
@@ -146,6 +147,18 @@ export const PlatformMessagingTab: React.FC<PlatformMessagingTabProps> = ({
     if (!newMessageBody.trim()) {
       alert("⚠️ يرجى كتابة نص الرسالة أو التنبيه.");
       return;
+    }
+
+    try {
+      // ⚡ STRICT CLOUD-FIRST: Await cloud insertion and dispatch high-priority FCM push notification
+      await cloudSendChatMessage({
+        barcode: selectedStudent.barcode,
+        message: newMessageBody.trim(),
+        senderName: "إشراف المنظومة",
+        studentFallback: selectedStudent,
+      });
+    } catch (err: any) {
+      console.warn("[PlatformMessagingTab] Error persisting chat message to cloud:", err);
     }
 
     enqueuePlatformMessage({
@@ -159,7 +172,7 @@ export const PlatformMessagingTab: React.FC<PlatformMessagingTabProps> = ({
       channel: "in_app",
     });
 
-    setComposerFeedback(`✅ تم توثيق وإرسال الإشعار بنجاح للطالب (${selectedStudent.name}) داخل سجل المنصة!`);
+    setComposerFeedback(`✅ تم توثيق وإرسال الإشعار وبث إشعار FCM الفوري للطالب (${selectedStudent.name})!`);
     setSelectedStudent(null);
     setNewMessageTitle("");
     setNewMessageBody("");

@@ -7,6 +7,7 @@ import {
   saveHomeworkToSupabase,
   subscribeToHomeworkChanges,
 } from "../utils/supabaseClient";
+import { cloudBulkUpdateHomeworkStatus } from "../services/supabaseMutationService";
 
 function playFeedbackTone(success: boolean) {
   try {
@@ -276,8 +277,8 @@ export const HomeworkTrackerTab: React.FC<HomeworkTrackerTabProps> = ({
     }
   };
 
-  // Dispatch all notices to Platform Messages Batch (channel: in_app)
-  const handleDispatchAllToPlatform = () => {
+  // Dispatch all notices to Platform Messages Batch & FCM Push Notifications
+  const handleDispatchAllToPlatform = async () => {
     if (totalPresent === 0) {
       alert("⚠️ لا يوجد طلاب حاضرون في هذه المجموعة لإرسال إشعارات لهم.");
       return;
@@ -335,32 +336,45 @@ export const HomeworkTrackerTab: React.FC<HomeworkTrackerTabProps> = ({
       timestamp: Date.now(),
     }).catch(console.warn);
 
-    // ⚡ Supabase Direct Persistence: Save homework records in Supabase
-    const hwRows = [
+    // ⚡ Supabase Direct Persistence & High-Priority FCM Push Notifications
+    const hwRecords = [
       ...processedLists.notDoneStudents.map(({ student }) => ({
         barcode: student.barcode,
+        studentName: student.name,
+        parentPhone: student.parentPhone || student.phone,
         dateKey: todayKey,
         status: "not_done" as const,
         notes: "لم يتم تسليم الواجب",
       })),
       ...processedLists.deficientStudents.map(({ student }) => ({
         barcode: student.barcode,
+        studentName: student.name,
+        parentPhone: student.parentPhone || student.phone,
         dateKey: todayKey,
         status: "incomplete" as const,
         notes: "حل ناقص / غير مكتمل",
       })),
       ...processedLists.completedStudents.map(({ student }) => ({
         barcode: student.barcode,
+        studentName: student.name,
+        parentPhone: student.parentPhone || student.phone,
         dateKey: todayKey,
         status: "done" as const,
         notes: "تسليم ممتاز وكامل",
       })),
     ];
-    saveHomeworkToSupabase(hwRows).catch(console.warn);
+
+    try {
+      await cloudBulkUpdateHomeworkStatus(hwRecords);
+    } catch (err) {
+      console.warn("[HomeworkTrackerTab] Error in cloud bulk homework update:", err);
+      // Fallback
+      saveHomeworkToSupabase(hwRecords).catch(console.warn);
+    }
 
     setIsDispatched(true);
     setFeedbackMessage({
-      text: `✅ تم بنجاح توثيق وإرسال إشعارات الواجبات داخل المنصة لكامل المجموعة (${totalPresent} طالب حاضر)! وتم استثناء (${processedLists.absentStudents.length}) طالب غائب تلقائياً.`,
+      text: `✅ تم بنجاح توثيق وإرسال إشعارات الواجبات داخل المنصة وبث تنبيهات FCM لكامل المجموعة (${totalPresent} طالب حاضر)! وتم استثناء (${processedLists.absentStudents.length}) طالب غائب تلقائياً.`,
       type: "success",
     });
 

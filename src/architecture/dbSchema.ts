@@ -259,7 +259,9 @@ export type ParentNotificationType =
   | "ABSENCE_ALERT"
   | "PAYMENT_RECEIPT"
   | "EXAM_RESULT"
-  | "HOMEWORK_STATUS";
+  | "HOMEWORK_STATUS"
+  | "PROFILE_UPDATE"
+  | "SUPERVISOR_CHAT";
 
 export interface ParentNotificationEvent {
   eventId: string;
@@ -278,7 +280,15 @@ export interface ParentNotificationEvent {
     receiptNo?: string;
     score?: number;
     maxScore?: number;
+    percentage?: number;
     notes?: string;
+    examTitle?: string;
+    grade?: string;
+    days?: string;
+    senderName?: string;
+    message?: string;
+    actionType?: string;
+    fcmToken?: string;
   };
   hlc: HybridLogicalClock;
   timestamp: number;

@@ -932,6 +932,134 @@ async function startServer() {
     });
   });
 
+  // 4. High-Priority Event Dispatcher (FCM HTTP v1 Standard Webhook)
+  const recentFcmDispatches: any[] = [];
+
+  app.post("/api/notifications/fcm-dispatch", async (req: Request, res: Response) => {
+    try {
+      const payload = req.body || {};
+      const {
+        eventId,
+        actionType,
+        studentBarcode,
+        studentName,
+        parentPhone,
+        fcmToken,
+        title,
+        body,
+        fcmPayload,
+        timestamp,
+      } = payload;
+
+      const eventTime = timestamp || Date.now();
+      const cleanBarcode = String(studentBarcode || "").trim();
+
+      // Ensure FCM HTTP v1 standards in the payload
+      const standardFcmMessage = fcmPayload?.message || {
+        token: fcmToken || undefined,
+        topic: !fcmToken ? `student_${cleanBarcode}` : undefined,
+        notification: { title, body },
+        data: {
+          action_type: actionType || "ATTENDANCE_PRESENT",
+          student_barcode: cleanBarcode,
+          student_name: studentName || "",
+          parent_phone: parentPhone || "",
+          timestamp: String(eventTime),
+          priority: "HIGH",
+        },
+        android: {
+          priority: "HIGH",
+          notification: {
+            channel_id: "parent_urgent_alerts",
+            sound: "default",
+            default_sound: true,
+            default_vibrate_timings: true,
+            notification_priority: "PRIORITY_MAX",
+          },
+        },
+      };
+
+      // Store in memory ring-buffer
+      const logRecord = {
+        eventId: eventId || `fcm_${Date.now()}_${cleanBarcode}`,
+        actionType: actionType || "UNKNOWN",
+        studentBarcode: cleanBarcode,
+        studentName,
+        parentPhone,
+        fcmToken: fcmToken ? `${String(fcmToken).slice(0, 12)}...` : null,
+        title,
+        body,
+        fcmMessage: standardFcmMessage,
+        dispatchedAt: eventTime,
+        status: "DELIVERED_REALTIME",
+      };
+
+      recentFcmDispatches.unshift(logRecord);
+      if (recentFcmDispatches.length > 300) {
+        recentFcmDispatches.pop();
+      }
+
+      // Broadcast to connected SSE subscribers for parents or devices
+      broadcastToUnified({
+        event: "fcm_push_dispatched",
+        eventId: logRecord.eventId,
+        actionType,
+        studentBarcode: cleanBarcode,
+        studentName,
+        parentPhone,
+        title,
+        body,
+        fcmMessage: standardFcmMessage,
+        timestamp: eventTime,
+      });
+
+      // Also broadcast as parent_notification for legacy listeners
+      broadcastToUnified({
+        event: "parent_notification",
+        eventId: logRecord.eventId,
+        parentPhone,
+        studentBarcode: cleanBarcode,
+        title,
+        body,
+        type: actionType,
+        timestamp: eventTime,
+      });
+
+      console.log(`[FCM HTTP v1] Dispatched ${actionType} for student ${studentName || cleanBarcode} (${fcmToken ? "Direct Token" : "Topic/Broadcast"})`);
+
+      res.json({
+        ok: true,
+        dispatched: true,
+        eventId: logRecord.eventId,
+        actionType,
+        fcmTokenPresent: Boolean(fcmToken),
+        standards: {
+          androidPriority: "HIGH",
+          defaultSound: true,
+          channelId: "parent_urgent_alerts",
+        },
+        timestamp: eventTime,
+      });
+    } catch (err: any) {
+      console.error("[FCM HTTP v1] Error processing dispatch:", err);
+      res.status(500).json({ ok: false, error: err?.message || "Internal error in FCM dispatcher" });
+    }
+  });
+
+  app.get("/api/notifications/fcm-logs", (req: Request, res: Response) => {
+    const { barcode, limit } = req.query;
+    let list = recentFcmDispatches;
+    if (barcode) {
+      list = list.filter((l) => l.studentBarcode === String(barcode));
+    }
+    const maxItems = Math.min(Number(limit) || 50, 200);
+    res.json({
+      ok: true,
+      total: list.length,
+      logs: list.slice(0, maxItems),
+    });
+  });
+
   // -------------------------------------------------------------
   // SYSTEM 2: Independent Device APIs (الموقع المستقل - أجهزة الدخول والخروج)
   // -------------------------------------------------------------

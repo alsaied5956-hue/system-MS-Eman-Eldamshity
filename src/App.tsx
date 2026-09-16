@@ -1302,7 +1302,8 @@ export default function App() {
         dateKey,
         newStatus,
         studentObj?.name || `طالب ${barcode}`,
-        currentUser?.username || "admin"
+        currentUser?.username || "admin",
+        studentObj
       );
 
       const dateMap = attendanceHistory[dateKey] || {};
@@ -1553,6 +1554,7 @@ export default function App() {
         score,
         maxScore,
         recordedBy: currentUser?.username || "admin",
+        studentFallback: targetStudent,
       });
 
       const updated = students.map((s) => {
