@@ -1316,10 +1316,16 @@ async function startServer() {
   const httpServer = createHttpServer(app);
 
   if (process.env.NODE_ENV !== "production") {
+    // The hosted preview proxies HTTP but not Vite's raw HMR WebSocket upgrade,
+    // and it already layers its own hot-reload on top of the dev server. Vite's
+    // own HMR socket is therefore redundant here and its failed connection
+    // attempts are what surface as "WebSocket closed without opened" in the
+    // browser console. Disable it by default; opt back in with ENABLE_HMR=true.
+    const enableHmr = process.env.ENABLE_HMR === "true" && process.env.DISABLE_HMR !== "true";
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === "true" ? false : { server: httpServer },
+        hmr: enableHmr ? { server: httpServer } : false,
       },
       appType: "spa",
     });
