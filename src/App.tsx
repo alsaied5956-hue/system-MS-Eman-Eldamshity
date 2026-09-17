@@ -1522,16 +1522,19 @@ export default function App() {
         recordedBy: currentUser?.username || "admin",
       };
 
-      const updatedPayments = {
-        ...payments,
-        [monthKey]: {
-          ...monthData,
-          [barcode]: newRecord,
-        },
-      };
-
-      setPayments(updatedPayments);
-      savePaymentsData(updatedPayments);
+      setPayments((prev) => {
+        const monthData = prev[monthKey] || {};
+        const updatedPayments = {
+          ...prev,
+          [monthKey]: {
+            ...monthData,
+            [barcode]: newRecord,
+          },
+        };
+        paymentsRef.current = updatedPayments;
+        savePaymentsData(updatedPayments);
+        return updatedPayments;
+      });
 
       dualSyncPaymentRecord({
         barcode,
@@ -1547,7 +1550,7 @@ export default function App() {
       console.error("[App] Failed to record payment in cloud:", err);
       alert(`❌ فشل تسجيل الاشتراك في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
-  }, [payments, currentUser, students]);
+  }, [currentUser]);
 
   // Handler: Update / Move Payment (e.g. change month from 8 to 9, or correct amount/notes)
   const handleUpdatePayment = useCallback(async (
@@ -1558,12 +1561,12 @@ export default function App() {
     newNote: string,
     newDate?: string
   ) => {
-    const existing = payments[oldMonthKey]?.[barcode];
+    const existing = paymentsRef.current[oldMonthKey]?.[barcode];
     const today = getTodayKey();
     const time = formatTimeArabic();
     const finalDate = newDate || existing?.date || today;
     const finalNote = newNote || `اشتراك شهر ${newMonthKey}`;
-    const studentObj = students.find((s) => s.barcode === barcode);
+    const studentObj = appStudentsRef.current?.find((s) => s.barcode === barcode);
 
     try {
       // ⚡ STRICT CLOUD-FIRST: Await Supabase update
@@ -1578,32 +1581,34 @@ export default function App() {
         studentFallback: studentObj,
       });
 
-      const updatedPayments = { ...payments };
+      setPayments((prev) => {
+        const updatedPayments = { ...prev };
 
-      // Remove from old month
-      if (updatedPayments[oldMonthKey]) {
-        const oldMonthMap = { ...updatedPayments[oldMonthKey] };
-        delete oldMonthMap[barcode];
-        updatedPayments[oldMonthKey] = oldMonthMap;
-      }
+        // Remove from old month
+        if (updatedPayments[oldMonthKey]) {
+          const oldMonthMap = { ...updatedPayments[oldMonthKey] };
+          delete oldMonthMap[barcode];
+          updatedPayments[oldMonthKey] = oldMonthMap;
+        }
 
-      // Add to new month
-      const newMonthMap = { ...(updatedPayments[newMonthKey] || {}) };
-      newMonthMap[barcode] = {
-        barcode,
-        month: newMonthKey,
-        monthKey: newMonthKey,
-        amount: newAmount,
-        date: finalDate,
-        time: existing?.time || time,
-        note: finalNote,
-        recordedBy: existing?.recordedBy || currentUser?.username || "admin",
-        isCardFee: existing?.isCardFee,
-      };
-      updatedPayments[newMonthKey] = newMonthMap;
-
-      setPayments(updatedPayments);
-      savePaymentsData(updatedPayments);
+        // Add to new month
+        const newMonthMap = { ...(updatedPayments[newMonthKey] || {}) };
+        newMonthMap[barcode] = {
+          barcode,
+          month: newMonthKey,
+          monthKey: newMonthKey,
+          amount: newAmount,
+          date: finalDate,
+          time: existing?.time || time,
+          note: finalNote,
+          recordedBy: existing?.recordedBy || currentUser?.username || "admin",
+          isCardFee: existing?.isCardFee,
+        };
+        updatedPayments[newMonthKey] = newMonthMap;
+        paymentsRef.current = updatedPayments;
+        savePaymentsData(updatedPayments);
+        return updatedPayments;
+      });
 
       dualSyncPaymentUpdate({
         oldMonthKey,
@@ -1619,37 +1624,40 @@ export default function App() {
       console.error("[App] Failed to update payment in cloud:", err);
       alert(`❌ فشل تعديل الاشتراك في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
-  }, [payments, currentUser, students]);
+  }, [currentUser]);
 
   // Handler: Delete Payment (revert student to unpaid for this month)
   const handleDeletePayment = useCallback(async (monthKey: string, barcode: string) => {
-    if (!payments[monthKey]?.[barcode]) return;
-
-    const paymentRecord = payments[monthKey][barcode];
+    const existing = paymentsRef.current[monthKey]?.[barcode];
+    if (!existing) return;
 
     try {
       // ⚡ STRICT CLOUD-FIRST: Await Supabase deletion
-      await cloudDeletePayment(monthKey, barcode, paymentRecord?.id);
-
-      const updatedPayments = { ...payments };
-      const monthMap = { ...updatedPayments[monthKey] };
-      delete monthMap[barcode];
-      updatedPayments[monthKey] = monthMap;
+      await cloudDeletePayment(monthKey, barcode, existing?.id);
 
       const paymentKey = `${monthKey}_${String(barcode).trim()}`;
-      setPayments(updatedPayments);
-      savePaymentsData(updatedPayments, paymentKey);
+      setPayments((prev) => {
+        const updatedPayments = { ...prev };
+        if (updatedPayments[monthKey]) {
+          const monthMap = { ...updatedPayments[monthKey] };
+          delete monthMap[barcode];
+          updatedPayments[monthKey] = monthMap;
+        }
+        paymentsRef.current = updatedPayments;
+        savePaymentsData(updatedPayments, paymentKey);
+        return updatedPayments;
+      });
 
       dualSyncPaymentDelete({
         barcode,
         monthKey,
-        paymentId: paymentRecord?.id,
+        paymentId: existing?.id,
       });
     } catch (err: any) {
       console.error("[App] Failed to delete payment from cloud:", err);
       alert(`❌ فشل حذف الاشتراك من السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
-  }, [payments]);
+  }, []);
 
   // Handler: Record Exam Grade
   const handleRecordExamGrade = useCallback(async (
