@@ -85,14 +85,22 @@ const ScannerInputBar = React.memo<ScannerInputBarProps>(({
   onOpenCameraScanner,
 }) => {
   const [localInput, setLocalInput] = useState("");
+  const isSubmittingRef = useRef(false);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setLocalInput(e.target.value);
   }, []);
 
   const doScan = useCallback((rawCode: string) => {
-    const code = rawCode.trim();
+    const code = normalizeBarcode(rawCode);
     if (!code) return;
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setTimeout(() => {
+      isSubmittingRef.current = false;
+    }, 250);
+
+    setLocalInput("");
     if (typeof onScan === "function") {
       onScan(code);
     } else if (typeof onScanned === "function") {
@@ -102,9 +110,9 @@ const ScannerInputBar = React.memo<ScannerInputBarProps>(({
 
   const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     const code = localInput.trim();
     if (code) {
-      setLocalInput("");
       doScan(code);
     }
   }, [localInput, doScan]);
@@ -112,9 +120,9 @@ const ScannerInputBar = React.memo<ScannerInputBarProps>(({
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
+      e.stopPropagation();
       const code = localInput.trim();
       if (code) {
-        setLocalInput("");
         doScan(code);
       }
     }
@@ -775,12 +783,17 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     let lastKeyTime = Date.now();
 
     const handleWindowKeyDown = (e: KeyboardEvent) => {
-      // Ignore if actively typing in modal or textarea or search box
       const target = e.target as HTMLElement | null;
+
+      // 🛑 CRITICAL FIX: If user is actively typing directly inside the input bar or any other text field,
+      // let the input element's own onKeyDown/onSubmit handle it exclusively!
+      // This completely stops the global listener from capturing partial keystrokes or double-submitting Enter.
       if (
         target &&
-        target !== inputRef.current &&
-        (target.tagName === "TEXTAREA" || target.isContentEditable || (target.tagName === "INPUT" && (target as HTMLInputElement).type === "search"))
+        (target === inputRef.current ||
+         target.tagName === "INPUT" ||
+         target.tagName === "TEXTAREA" ||
+         target.isContentEditable)
       ) {
         return;
       }

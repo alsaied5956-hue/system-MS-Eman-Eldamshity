@@ -263,7 +263,11 @@ export async function cloudRecordAttendance(
 ): Promise<{ barcode: string; status: string; timeIso: string }> {
   const b = String(barcode).trim();
   const dateKey = getTodayDateKey();
-  const studentId = await ensureStudentInSupabase(b, studentFallback || { name: studentName });
+  let studentId = await ensureStudentInSupabase(b, studentFallback || { name: studentName });
+
+  if (!studentId) {
+    studentId = await getStudentIdByBarcode(b);
+  }
 
   if (!studentId) {
     throw new Error(`تعذر العثور على سجل الطالب (${b}) لتسجيل الحضور`);

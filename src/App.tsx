@@ -895,7 +895,14 @@ export default function App() {
     const todayKey = getTodayKey();
 
     try {
-      // 1. Optimistic UI Update: Immediately update state in 0ms (zero input lag)
+      // 1. Check prior status before updating state
+      const priorStatus = attendanceTodayRef.current[cleanBarcode];
+      const fullStudent =
+        (appStudentsRef.current || students).find(
+          (s) => String(s.barcode).trim() === cleanBarcode
+        ) || student;
+
+      // 2. Optimistic UI Update: Immediately update state in 0ms (zero input lag)
       if (!scanLogOrderRef.current.includes(cleanBarcode)) {
         scanLogOrderRef.current = [cleanBarcode, ...scanLogOrderRef.current];
       }
@@ -915,11 +922,10 @@ export default function App() {
         },
       };
 
-      const prevStatus = attendanceTodayRef.current[cleanBarcode];
       let updatedStudents = appStudentsRef.current;
       
       // Increment attendance days if student was not already marked present today
-      if (!prevStatus || prevStatus === "غائب") {
+      if (!priorStatus || priorStatus === "غائب") {
         updatedStudents = appStudentsRef.current.map((s) => {
           if (String(s.barcode).trim() === cleanBarcode) {
             return {
@@ -948,15 +954,15 @@ export default function App() {
       // Dual-Sync to Firebase immediately with sourceDeviceId
       dualSyncLiveScan({
         barcode: cleanBarcode,
-        name: student.name,
-        grade: student.groupGrade,
-        days: student.groupDays,
+        name: fullStudent.name,
+        grade: fullStudent.groupGrade,
+        days: fullStudent.groupDays,
         status,
         timeIso,
         timeDisplay: new Date(timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }),
         isPaid: isStudentPaid(payments?.[getCurrentMonthKey()], cleanBarcode),
         scannedBy: currentUser?.username || "الماسح",
-        studentFallback: student,
+        studentFallback: fullStudent,
         sourceDeviceId: getPersistentDeviceId(),
       });
 
@@ -975,11 +981,11 @@ export default function App() {
         cleanBarcode,
         status,
         timeIso,
-        student?.name || `طالب ${cleanBarcode}`,
+        fullStudent?.name || `طالب ${cleanBarcode}`,
         currentUser?.username || "الماسح",
-        student
+        fullStudent
       ).catch((err) => {
-        console.error("[App] Asynchronous cloud scan error:", err);
+        console.warn("[App] Asynchronous cloud scan error:", err);
       });
     } catch (err: any) {
       console.error("[App] Failed to commit scan attendance:", err);
