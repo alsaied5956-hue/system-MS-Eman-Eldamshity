@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import {
   Student,
   GradeName,
@@ -59,6 +59,229 @@ import {
   ShieldCheck,
 } from "lucide-react";
 
+// =========================================================================
+// 🚀 MEMOIZED SUB-COMPONENTS: Prevent full-page re-renders on keystroke/scan
+// =========================================================================
+
+interface ScannerInputBarProps {
+  onScan?: (code: string) => void;
+  onScanned?: (code: string) => void;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onBlur: (e: React.FocusEvent<HTMLInputElement>) => void;
+  scanDirectionMode?: "entry" | "exit";
+  onOpenManualModal: () => void;
+  onOpenOtherDaysModal: () => void;
+  onOpenCameraScanner: () => void;
+}
+
+const ScannerInputBar = React.memo<ScannerInputBarProps>(({
+  onScan,
+  onScanned,
+  inputRef,
+  onBlur,
+  scanDirectionMode,
+  onOpenManualModal,
+  onOpenOtherDaysModal,
+  onOpenCameraScanner,
+}) => {
+  const [localInput, setLocalInput] = useState("");
+
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setLocalInput(e.target.value);
+  }, []);
+
+  const doScan = useCallback((rawCode: string) => {
+    const code = rawCode.trim();
+    if (!code) return;
+    if (typeof onScan === "function") {
+      onScan(code);
+    } else if (typeof onScanned === "function") {
+      onScanned(code);
+    }
+  }, [onScan, onScanned]);
+
+  const handleSubmit = useCallback((e: React.FormEvent) => {
+    e.preventDefault();
+    const code = localInput.trim();
+    if (code) {
+      setLocalInput("");
+      doScan(code);
+    }
+  }, [localInput, doScan]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const code = localInput.trim();
+      if (code) {
+        setLocalInput("");
+        doScan(code);
+      }
+    }
+  }, [localInput, doScan]);
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-wrap sm:flex-nowrap gap-2.5">
+      <div className="relative flex-1 group min-w-[260px]">
+        <input
+          ref={inputRef}
+          type="text"
+          value={localInput}
+          onChange={handleChange}
+          onBlur={onBlur}
+          onKeyDown={handleKeyDown}
+          placeholder="مرر كارت الطالب أمام الإسكانر أو اكتب الكود..."
+          autoFocus
+          className="w-full bg-[#060a17] border-2 border-indigo-500/40 focus:border-amber-400 text-amber-300 text-center font-mono font-black text-2xl md:text-3xl px-4 py-4 rounded-3xl outline-none focus:ring-4 focus:ring-amber-400/20 shadow-2xl placeholder:text-slate-600 placeholder:text-base transition-all"
+        />
+        <ScanLine className="w-7 h-7 text-amber-400/70 absolute left-4 top-4 pointer-events-none animate-pulse" />
+      </div>
+
+      {/* Button 0: Camera Barcode/QR Scanner */}
+      <button
+        type="button"
+        onClick={onOpenCameraScanner}
+        className="px-4 py-3.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-emerald-600/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-emerald-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
+        title="مسح كارت الطالب عبر كاميرا الموبايل أو اللابتوب"
+      >
+        <Camera className="w-5 h-5" />
+        <span>مسح بالكاميرا 📷</span>
+      </button>
+
+      {/* Button 1: Smart Manual Search */}
+      <button
+        type="button"
+        onClick={onOpenManualModal}
+        className="px-4 py-3.5 bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-slate-950 font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-cyan-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-cyan-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
+        title="بحث بالاسم أو الكود للتحضير اليدوي"
+      >
+        <PlusCircle className="w-5 h-5" />
+        <span>بحث يدوي ذكي</span>
+      </button>
+
+      {/* Button 2: Cross-Day Makeup Attendance for Same Grade */}
+      <button
+        type="button"
+        onClick={onOpenOtherDaysModal}
+        className="px-4 py-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs md:text-sm rounded-3xl shadow-xl shadow-amber-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-amber-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
+        title="حضور طالب من أيام أخرى لنفس الصف الدراسي"
+      >
+        <UserPlus className="w-5 h-5" />
+        <span>👥 حضور طالب من يوم آخر (تعويض)</span>
+      </button>
+    </form>
+  );
+});
+ScannerInputBar.displayName = "ScannerInputBar";
+
+interface ScannedTableRowProps {
+  barcode: string;
+  orderNumber: number;
+  student: Student;
+  isPaid: boolean;
+  statusToday: string;
+  formattedTime: string;
+  isCrossDayMakeup: boolean;
+  selectedGrade?: string;
+  selectedDays?: string;
+  onSendWhatsApp: (student: Student, isCrossDay: boolean, status: string, time: string) => void;
+  onRemove?: (barcode: string) => void;
+  onRemoveFromScanner?: (barcode: string) => void;
+}
+
+const ScannedTableRow = React.memo<ScannedTableRowProps>(({
+  barcode,
+  orderNumber,
+  student,
+  isPaid,
+  statusToday,
+  formattedTime,
+  isCrossDayMakeup,
+  selectedGrade,
+  selectedDays,
+  onSendWhatsApp,
+  onRemove,
+  onRemoveFromScanner,
+}) => {
+  const handleWhatsApp = useCallback(() => {
+    onSendWhatsApp(student, isCrossDayMakeup, statusToday, formattedTime);
+  }, [student, isCrossDayMakeup, statusToday, formattedTime, onSendWhatsApp]);
+
+  const handleRemove = useCallback(() => {
+    if (onRemove) {
+      onRemove(barcode);
+    } else if (onRemoveFromScanner) {
+      onRemoveFromScanner(barcode);
+    }
+  }, [barcode, onRemove, onRemoveFromScanner]);
+
+  return (
+    <tr className="hover:bg-indigo-500/10 transition-colors font-medium">
+      <td className="p-3.5 font-black text-amber-400 font-mono">#{orderNumber}</td>
+      <td className="p-3.5 font-mono text-slate-300 font-bold">{student.barcode}</td>
+      <td className="p-3.5 font-bold text-white flex items-center gap-2">
+        <span>{student.name}</span>
+        {isCrossDayMakeup && (
+          <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full">
+            🔄 تعويض ({student.groupDays})
+          </span>
+        )}
+      </td>
+      <td className="p-3.5 text-slate-300 text-xs">
+        {student.groupGrade} • {student.groupDays}
+      </td>
+      <td className="p-3.5">
+        <span
+          className={`font-bold text-xs px-2.5 py-1 rounded-full ${
+            isPaid
+              ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+              : "bg-rose-500/10 text-rose-400 border border-rose-500/30"
+          }`}
+        >
+          {isPaid ? "✅ مدفوع" : "❌ غير مدفوع"}
+          {student.customMonthlyFee !== undefined && ` (${student.customMonthlyFee} ج)`}
+        </span>
+      </td>
+      <td className="p-3.5">
+        <span
+          className={`font-bold text-xs px-2.5 py-1 rounded-full ${
+            statusToday === "تأخير"
+              ? "bg-amber-500/10 text-amber-400 border border-amber-500/30"
+              : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+          }`}
+        >
+          {statusToday === "تأخير" ? "🟡 تأخير" : "🟢 حضور"}
+        </span>
+      </td>
+      <td className="p-3.5 font-mono text-slate-300">{formattedTime}</td>
+      <td className="p-3.5 text-center">
+        <div className="flex items-center justify-center gap-1.5">
+          <button
+            type="button"
+            onClick={handleWhatsApp}
+            className="px-2.5 py-1 rounded-xl bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-white border border-emerald-500/30 text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
+            title="إرسال رسالة واتساب لولي الأمر"
+          >
+            📲 <span className="hidden sm:inline">واتساب</span>
+          </button>
+          {onRemove && (
+            <button
+              type="button"
+              onClick={handleRemove}
+              className="px-2 py-1 rounded-xl bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
+              title="إزالة من قائمة الاسكانر الحالية"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">إزالة</span>
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+});
+ScannedTableRow.displayName = "ScannedTableRow";
+
 interface AttendanceScannerProps {
   students: Student[];
   attendanceToday: Record<string, string>;
@@ -79,7 +302,7 @@ interface AttendanceScannerProps {
     absentList: { student: Student; message: string; type: "غائب" }[],
     lateList: { student: Student; message: string; type: "تأخير" }[],
     crossDayList?: { student: Student; message: string; type: "عكس_أيام" }[]
-  ) => void;
+  ) => Promise<void> | void;
   onRemoveFromScanner?: (barcode: string) => void;
   onClearSessionScans?: (grade: GradeName, resetTodayAttendance?: boolean) => void;
   onChangeStatus?: (barcode: string, dateKey: string, newStatus: string) => void;
@@ -119,7 +342,16 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     return "سبت - إثنين - أربعاء";
   });
 
-  const [barcodeInput, setBarcodeInput] = useState("");
+  // ⚡ Dedicated scanner queue state with instant optimistic UI cleanup
+  const [scannerQueue, setScannerQueue] = useState<string[]>(() => scanLogOrder || []);
+
+  useEffect(() => {
+    setScannerQueue(scanLogOrder || []);
+  }, [scanLogOrder]);
+
+  const scannerQueueRef = useRef(scannerQueue);
+  scannerQueueRef.current = scannerQueue;
+
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [manualModalTab, setManualModalTab] = useState<"manual_search" | "other_days">("manual_search");
   const [manualSearchQuery, setManualSearchQuery] = useState("");
@@ -228,8 +460,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   scanDirectionModeRef.current = scanDirectionMode;
   const activeSessionSlotIdRef = useRef(activeSessionSlotId);
   activeSessionSlotIdRef.current = activeSessionSlotId;
-  const scanLogOrderRef = useRef(scanLogOrder || []);
-  scanLogOrderRef.current = scanLogOrder || [];
+  const scanLogOrderRef = useRef(scannerQueue);
+  scanLogOrderRef.current = scannerQueue;
   const scanLogTimesRef = useRef(scanLogTimes || {});
   scanLogTimesRef.current = scanLogTimes || {};
   const attendanceTodayRef = useRef(attendanceToday || {});
@@ -300,6 +532,10 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         processedScansSet.current.clear();
       }
 
+      // ⚡ Optimistically add incoming scan to local scanner queue
+      const incomingBarcode = String(payload.barcode).trim();
+      setScannerQueue((prev) => (prev.includes(incomingBarcode) ? prev : [incomingBarcode, ...prev]));
+
       setLiveAssistantNotice({
         name: payload.name,
         status: payload.status,
@@ -323,26 +559,26 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   }, []);
 
   // Sync selected group to localStorage
-  const handleGradeChange = (grade: GradeName) => {
+  const handleGradeChange = useCallback((grade: GradeName) => {
     setSelectedGrade(grade);
     setFinishedBanner(null);
     setSelectedManualStudent(null);
     if (typeof window !== "undefined") {
       localStorage.setItem("aiman_scanner_grade", grade);
     }
-  };
+  }, []);
 
-  const handleDaysChange = (days: GroupDays) => {
+  const handleDaysChange = useCallback((days: GroupDays) => {
     setSelectedDays(days);
     setFinishedBanner(null);
     setSelectedManualStudent(null);
     if (typeof window !== "undefined") {
       localStorage.setItem("aiman_scanner_days", days);
     }
-  };
+  }, []);
 
   // Keep focus locked on input for ultra-fast, continuous, sub-10ms scanning
-  const handleInputBlur = (e: React.FocusEvent<HTMLInputElement>) => {
+  const handleInputBlur = useCallback((e: React.FocusEvent<HTMLInputElement>) => {
     if (isManualModalOpen || isCameraScannerOpen || isNewSessionModalOpen || absenceConfirmData) return;
     const related = e.relatedTarget as HTMLElement | null;
     if (related && (related.tagName === "INPUT" || related.tagName === "TEXTAREA" || related.tagName === "SELECT")) {
@@ -351,7 +587,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     requestAnimationFrame(() => {
       inputRef.current?.focus();
     });
-  };
+  }, [isManualModalOpen, isCameraScannerOpen, isNewSessionModalOpen, absenceConfirmData]);
 
   useEffect(() => {
     if (!isManualModalOpen && !isCameraScannerOpen && !isNewSessionModalOpen && !absenceConfirmData) {
@@ -363,7 +599,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     }
   }, [scanAlert, isManualModalOpen, isCameraScannerOpen, isNewSessionModalOpen, absenceConfirmData]);
 
-  const processAttendance = (
+  const processAttendance = useCallback((
     student: Student,
     overrideStatus?: "حضور" | "تأخير"
   ) => {
@@ -386,7 +622,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     }
 
     // 2. Prevent duplicate scan if student is already in the classroom presence list for this session
-    const alreadyInQueue = (scanLogOrderRef.current || []).some(
+    const alreadyInQueue = (scannerQueueRef.current || []).some(
       (b) => String(b).trim() === String(student.barcode).trim()
     );
 
@@ -407,6 +643,12 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       });
       return;
     }
+
+    // ⚡ Optimistic UI: Add student barcode to local scannerQueue state immediately
+    setScannerQueue((prev) => {
+      const clean = String(student.barcode).trim();
+      return prev.some((b) => String(b).trim() === clean) ? prev : [clean, ...prev];
+    });
 
     // 3. Record student at entry time & evaluate whether on-time (حضور) or late (تأخير)
     const now = new Date();
@@ -451,12 +693,13 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       status: calculatedStatus,
       isPaid,
     });
-  };
+  }, []);
 
-  const handleClearSessionForCurrentGrade = (resetTodayAttendance = false) => {
+  const handleClearSessionForCurrentGrade = useCallback((resetTodayAttendance = false) => {
     if (onClearSessionScans) {
       onClearSessionScans(selectedGrade, resetTodayAttendance);
     }
+    setScannerQueue([]);
     setScanAlert(null);
     setFinishedBanner(null);
     setIsNewSessionModalOpen(false);
@@ -468,10 +711,10 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     setTimeout(() => {
       setSessionResetSuccessNotice(null);
     }, 4500);
-  };
+  }, [onClearSessionScans, selectedGrade]);
 
   // 🎯 Core Scan Processing Function (Normalizes input, strips prefixes, deduplicates, finds student)
-  const processScannedCode = (rawCode: string) => {
+  const processScannedCode = useCallback((rawCode: string) => {
     const clean = normalizeBarcode(rawCode);
     if (!clean) return;
 
@@ -524,7 +767,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     }
 
     processAttendance(student);
-  };
+  }, [processAttendance]);
 
   // ⚡ Global Hardware USB Barcode Scanner Listener (Rock-solid, attached once, never drops keystrokes)
   useEffect(() => {
@@ -552,7 +795,6 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
           e.preventDefault();
           const scanned = keyBuffer.trim();
           keyBuffer = "";
-          setBarcodeInput("");
           processScannedCode(scanned);
         } else {
           keyBuffer = "";
@@ -572,17 +814,9 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
 
     window.addEventListener("keydown", handleWindowKeyDown);
     return () => window.removeEventListener("keydown", handleWindowKeyDown);
-  }, []);
+  }, [processScannedCode]);
 
-  const handleScanSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const barcode = barcodeInput;
-    setBarcodeInput("");
-    if (!barcode.trim()) return;
-    processScannedCode(barcode);
-  };
-
-  const handleRecordManual = (status: "حضور" | "تأخير", studentToRecord?: Student) => {
+  const handleRecordManual = useCallback((status: "حضور" | "تأخير", studentToRecord?: Student) => {
     const target = studentToRecord || selectedManualStudent;
     if (!target) return;
     processAttendance(target, status);
@@ -590,10 +824,35 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     setSelectedManualStudent(null);
     setManualSearchQuery("");
     setOtherDaysSearchQuery("");
-  };
+  }, [processAttendance, selectedManualStudent]);
+
+  const handleRemoveFromQueue = useCallback((barcode: string) => {
+    setScannerQueue((prev) => prev.filter((b) => b !== barcode));
+    if (onRemoveFromScanner) {
+      onRemoveFromScanner(barcode);
+    }
+  }, [onRemoveFromScanner]);
+
+  const handleOpenManualModal = useCallback(() => {
+    setManualModalTab("manual_search");
+    setIsManualModalOpen(true);
+    setManualSearchQuery("");
+    setSelectedManualStudent(null);
+  }, []);
+
+  const handleOpenOtherDaysModal = useCallback(() => {
+    setManualModalTab("other_days");
+    setIsManualModalOpen(true);
+    setOtherDaysSearchQuery("");
+    setSelectedManualStudent(null);
+  }, []);
+
+  const handleOpenCameraScanner = useCallback(() => {
+    setIsCameraScannerOpen(true);
+  }, []);
 
   // Handler: Finish and Send Group Attendance - Prepares absence list & opens Confirmation Modal
-  const handleFinishGroupClick = () => {
+  const handleFinishGroupClick = useCallback(() => {
     const groupStudents = (students || []).filter(
       (s) => s.groupGrade === selectedGrade && s.groupDays === selectedDays
     );
@@ -609,7 +868,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     let presentCount = 0;
 
     // طابور الحضور الفعلي بالقاعة الحالية (الطلاب الذين تم مسح كروت دخولهم)
-    const queueBarcodeSet = new Set((scanLogOrder || []).map((b) => String(b).trim()));
+    const queueBarcodeSet = new Set((scannerQueue || []).map((b) => String(b).trim()));
 
     groupStudents.forEach((student) => {
       const bCode = String(student.barcode).trim();
@@ -647,7 +906,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     });
 
     // الطلاب المسجلين لنفس الصف ولكن في أيام أخرى وحضروا اليوم تعويضياً ومسجلين بالقاعة
-    (scanLogOrder || []).forEach((barcode) => {
+    (scannerQueue || []).forEach((barcode) => {
       const bCode = String(barcode).trim();
       const st = (students || []).find((s) => String(s.barcode).trim() === bCode);
       if (!st) return;
@@ -685,20 +944,24 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       presentCount,
       totalStudents: groupStudents.length,
     });
-  };
+  }, [students, selectedGrade, selectedDays, scannerQueue, attendanceToday, scanLogTimes]);
 
   // إلغاء نافذة التأكيد والعودة للتعديل دون إرسال البيانات أو إغلاق المجموعة
-  const handleCancelAbsenceConfirm = () => {
+  const handleCancelAbsenceConfirm = useCallback(() => {
     setAbsenceConfirmData(null);
-  };
+  }, []);
 
   // تحويل طالب غائب إلى حاضر مباشرة من داخل نافذة المراجعة قبل الإرسال
-  const handleMarkAbsentStudentPresent = (studentToMark: Student) => {
+  const handleMarkAbsentStudentPresent = useCallback((studentToMark: Student) => {
     if (!absenceConfirmData) return;
     const nowIso = new Date().toISOString();
     if (onRecordAttendance) {
       onRecordAttendance(studentToMark.barcode, "حضور", nowIso, studentToMark);
     }
+    setScannerQueue((prev) => {
+      const clean = String(studentToMark.barcode).trim();
+      return prev.includes(clean) ? prev : [clean, ...prev];
+    });
     setAbsenceConfirmData((prev) => {
       if (!prev) return null;
       const updatedAbsentList = prev.absentList.filter(
@@ -710,50 +973,51 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         presentCount: prev.presentCount + 1,
       };
     });
-  };
+  }, [absenceConfirmData, onRecordAttendance]);
 
   // تأكيد واعتماد الغياب وإرسال البيانات فعلياً وإغلاق المجموعة
-  const handleConfirmAndSendAbsence = () => {
+  // ⚡ Optimistic UI: Clears scanner queue locally IMMEDIATELY with rollback on error
+  const handleConfirmAndSendAbsence = async () => {
     if (!absenceConfirmData) return;
 
     const { grade, days, absentList, lateList, crossDayList, presentCount } = absenceConfirmData;
-
-    // 1. Permanently record attendance in today's state and history, and clear group & cross-day from active scanner queue
-    if (onFinishGroup) {
-      onFinishGroup(grade, days, absentList, lateList, crossDayList);
-    }
-
-    // 1️⃣ Live Event Pipeline: Instant broadcast for absent and late students to `live_events/today`
-    absentList.forEach((a) => {
-      pushLiveAttendanceEvent(a.student.barcode, "غائب", Date.now());
-    });
-    lateList.forEach((l) => {
-      pushLiveAttendanceEvent(l.student.barcode, "تأخير", Date.now());
-    });
-
-    // 2. Direct Platform Notifications sent to Firebase platform_messages & notifications collections
     const combinedQueue = [...absentList, ...lateList, ...crossDayList];
-    if (combinedQueue.length > 0) {
-      enqueuePlatformMessagesBatch(
-        combinedQueue.map((item) => ({
-          studentBarcode: item.student.barcode,
-          studentName: item.student.name,
-          grade: item.student.groupGrade,
-          phone: item.student.parentPhone || item.student.phone || "",
-          messageType: item.type === "غائب" ? "غياب" : item.type === "تأخير" ? "تأخير" : "عكس_أيام",
-          title:
-            item.type === "غائب"
-              ? `إشعار غياب - ${item.student.name}`
-              : item.type === "تأخير"
-              ? `إشعار تأخير - ${item.student.name}`
-              : `إشعار تعويض أيام - ${item.student.name}`,
-          message: item.message,
-          channel: "in_app",
-        }))
-      );
-    }
 
-    // 3. Set finished banner info
+    // ⚡ Optimistic UI: Snapshot current queue & clear instantly
+    const previousQueue = [...scannerQueue];
+    setScannerQueue([]);
+
+    // 1️⃣ Live Event Pipeline & Platform Notifications asynchronously in background
+    setTimeout(() => {
+      absentList.forEach((a) => {
+        pushLiveAttendanceEvent(a.student.barcode, "غائب", Date.now());
+      });
+      lateList.forEach((l) => {
+        pushLiveAttendanceEvent(l.student.barcode, "تأخير", Date.now());
+      });
+
+      if (combinedQueue.length > 0) {
+        enqueuePlatformMessagesBatch(
+          combinedQueue.map((item) => ({
+            studentBarcode: item.student.barcode,
+            studentName: item.student.name,
+            grade: item.student.groupGrade,
+            phone: item.student.parentPhone || item.student.phone || "",
+            messageType: item.type === "غائب" ? "غياب" : item.type === "تأخير" ? "تأخير" : "عكس_أيام",
+            title:
+              item.type === "غائب"
+                ? `إشعار غياب - ${item.student.name}`
+                : item.type === "تأخير"
+                ? `إشعار تأخير - ${item.student.name}`
+                : `إشعار تعويض أيام - ${item.student.name}`,
+            message: item.message,
+            channel: "in_app",
+          }))
+        );
+      }
+    }, 0);
+
+    // 2. Set finished banner info
     setFinishedBanner({
       grade,
       days,
@@ -766,10 +1030,49 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     setScanAlert(null);
     setTableSearch("");
     setSelectedManualStudent(null);
-
-    // إغلاق نافذة التأكيد بعد الاعتماد والإرسال
     setAbsenceConfirmData(null);
+
+    // 3. Save to Supabase and handle network errors with rollback & error toast
+    try {
+      if (onFinishGroup) {
+        await onFinishGroup(grade, days, absentList, lateList, crossDayList);
+      }
+    } catch (err: any) {
+      console.error("[AttendanceScanner] Error saving group attendance:", err);
+      // Rollback scanner queue and show error toast
+      setScannerQueue(previousQueue);
+      setFinishedBanner(null);
+      setScanAlert({
+        type: "error",
+        title: "❌ فشل حفظ وترحيل الحضور",
+        message: `تعذر حفظ الحضور في قاعدة البيانات: ${err?.message || "خطأ في الاتصال بالشبكة"}. تم استرجاع طابور الحضور لعدم ضياع البيانات.`,
+      });
+    }
   };
+
+  const handleSendWhatsApp = useCallback((
+    student: Student,
+    isCrossDay: boolean,
+    status: string,
+    time: string
+  ) => {
+    if (isCrossDay) {
+      const timeStr = time !== "--:--" ? ` في تمام الساعة (${time})` : "";
+      const msg =
+        `تنبيه من منظومة الأستاذة إيمان الدمشيتي 📐\n` +
+        `نفيدكم بعلم أن الطالب/ة: (${student.name})\n` +
+        `المقيد في مجموعة: [${student.groupGrade} - ${student.groupDays}]\n` +
+        `قد حضر اليوم في مجموعة عكس الأيام: [${selectedGrade} - ${selectedDays}]\n` +
+        `حالة التسجيل: (${status})${timeStr}.\n` +
+        `تم تسجيل حضوره تعويضياً بنجاح.`;
+      openWhatsApp(student.parentPhone, msg);
+    } else {
+      openWhatsApp(
+        student.parentPhone,
+        `السلام عليكم ورحمة الله، نفيدكم بتسجيل حضور الطالب/ة (${student.name}) في حصة الرياضيات.`
+      );
+    }
+  }, [selectedGrade, selectedDays]);
 
   const currentMonthKey = getCurrentMonthKey();
   
@@ -800,9 +1103,9 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   const totalGroupCount = currentGroupStudents.length;
 
   const currentGroupScanned = useMemo(() => {
-    const scanSet = new Set((scanLogOrder || []).map(b => String(b).trim()));
+    const scanSet = new Set((scannerQueue || []).map(b => String(b).trim()));
     return currentGroupStudents.filter((s) => scanSet.has(String(s.barcode).trim()));
-  }, [currentGroupStudents, scanLogOrder]);
+  }, [currentGroupStudents, scannerQueue]);
 
   const currentGroupPresentCount = currentGroupScanned.filter(
     (s) => (attendanceToday?.[s.barcode] || "حضور") === "حضور"
@@ -814,17 +1117,17 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
 
   // Count makeup students of same grade who scanned today
   const makeupScannedStudents = useMemo(() => {
-    return (scanLogOrder || [])
+    return (scannerQueue || [])
       .map((b) => studentMap.get(String(b).trim()))
       .filter((s): s is Student => !!s && s.groupGrade === selectedGrade && s.groupDays !== selectedDays);
-  }, [scanLogOrder, studentMap, selectedGrade, selectedDays]);
+  }, [scannerQueue, studentMap, selectedGrade, selectedDays]);
 
   const currentGroupUnscannedCount = Math.max(0, totalGroupCount - currentGroupScanned.length);
 
   // Real-time detection of scans performed in OTHER grades on other devices/phones
   const otherGradesActiveScans = useMemo(() => {
     const counts: Record<string, number> = {};
-    (scanLogOrder || []).forEach((barcode) => {
+    (scannerQueue || []).forEach((barcode) => {
       const s = studentMap.get(String(barcode).trim());
       if (s && s.groupGrade !== selectedGrade) {
         counts[s.groupGrade] = (counts[s.groupGrade] || 0) + 1;
@@ -834,17 +1137,17 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       grade: grade as GradeName,
       count,
     }));
-  }, [scanLogOrder, studentMap, selectedGrade]);
+  }, [scannerQueue, studentMap, selectedGrade]);
 
-  const totalAllScannedToday = (scanLogOrder || []).length;
+  const totalAllScannedToday = (scannerQueue || []).length;
 
   // Active Scanned list in the scanner table - strictly for the selected grade only
   const displayedBarcodes = useMemo(() => {
-    return (scanLogOrder || []).filter((barcode) => {
+    return (scannerQueue || []).filter((barcode) => {
       const s = studentMap.get(String(barcode).trim());
       return s && s.groupGrade === selectedGrade;
     });
-  }, [scanLogOrder, studentMap, selectedGrade]);
+  }, [scannerQueue, studentMap, selectedGrade]);
 
   const filteredBarcodes = useMemo(() => {
     if (!tableSearch.trim()) return displayedBarcodes;
@@ -1175,74 +1478,17 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
           </span>
         </label>
 
-        <form onSubmit={handleScanSubmit} className="flex flex-wrap sm:flex-nowrap gap-2.5">
-          <div className="relative flex-1 group min-w-[260px]">
-            <input
-              ref={inputRef}
-              type="text"
-              value={barcodeInput}
-              onChange={(e) => setBarcodeInput(e.target.value)}
-              onBlur={handleInputBlur}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  const code = barcodeInput.trim();
-                  if (code) {
-                    setBarcodeInput("");
-                    processScannedCode(code);
-                  }
-                }
-              }}
-              placeholder="مرر كارت الطالب أمام الإسكانر أو اكتب الكود..."
-              autoFocus
-              className="w-full bg-[#060a17] border-2 border-indigo-500/40 focus:border-amber-400 text-amber-300 text-center font-mono font-black text-2xl md:text-3xl px-4 py-4 rounded-3xl outline-none focus:ring-4 focus:ring-amber-400/20 shadow-2xl placeholder:text-slate-600 placeholder:text-base transition-all"
-            />
-            <ScanLine className="w-7 h-7 text-amber-400/70 absolute left-4 top-4 pointer-events-none animate-pulse" />
-          </div>
-
-          {/* Button 0: Camera Barcode/QR Scanner */}
-          <button
-            type="button"
-            onClick={() => setIsCameraScannerOpen(true)}
-            className="px-4 py-3.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-emerald-600/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-emerald-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
-            title="مسح كارت الطالب عبر كاميرا الموبايل أو اللابتوب"
-          >
-            <Camera className="w-5 h-5" />
-            <span>مسح بالكاميرا 📷</span>
-          </button>
-
-          {/* Button 1: Smart Manual Search */}
-          <button
-            type="button"
-            onClick={() => {
-              setManualModalTab("manual_search");
-              setIsManualModalOpen(true);
-              setManualSearchQuery("");
-              setSelectedManualStudent(null);
-            }}
-            className="px-4 py-3.5 bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-slate-950 font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-cyan-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-cyan-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
-            title="بحث بالاسم أو الكود للتحضير اليدوي"
-          >
-            <PlusCircle className="w-5 h-5" />
-            <span>بحث يدوي ذكي</span>
-          </button>
-
-          {/* Button 2: Cross-Day Makeup Attendance for Same Grade */}
-          <button
-            type="button"
-            onClick={() => {
-              setManualModalTab("other_days");
-              setIsManualModalOpen(true);
-              setOtherDaysSearchQuery("");
-              setSelectedManualStudent(null);
-            }}
-            className="px-4 py-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs md:text-sm rounded-3xl shadow-xl shadow-amber-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-amber-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
-            title="حضور طالب من أيام أخرى لنفس الصف الدراسي"
-          >
-            <UserPlus className="w-5 h-5" />
-            <span>👥 حضور طالب من يوم آخر (تعويض)</span>
-          </button>
-        </form>
+        {/* Memoized Scanner Input Bar - isolates input keystrokes from re-rendering the parent */}
+        <ScannerInputBar
+          onScan={processScannedCode}
+          onScanned={processScannedCode}
+          scanDirectionMode={scanDirectionMode}
+          onOpenManualModal={handleOpenManualModal}
+          onOpenOtherDaysModal={handleOpenOtherDaysModal}
+          onOpenCameraScanner={handleOpenCameraScanner}
+          inputRef={inputRef}
+          onBlur={handleInputBlur}
+        />
 
         {/* Real-time Multi-Device Sync Diagnostics Bar */}
         <div className="flex flex-wrap items-center justify-between gap-3 p-3 bg-[#060a17]/90 border border-indigo-500/20 rounded-2xl text-xs font-tajawal shadow-lg">
@@ -1768,87 +2014,18 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                   const isCrossDayMakeup = student.groupDays !== selectedDays;
 
                   return (
-                    <tr
-                      key={barcode + idx}
-                      className="hover:bg-indigo-500/10 transition-colors font-medium"
-                    >
-                      <td className="p-3.5 font-black text-amber-400 font-mono">#{orderNumber}</td>
-                      <td className="p-3.5 font-mono text-slate-300 font-bold">{student.barcode}</td>
-                      <td className="p-3.5 font-bold text-white flex items-center gap-2">
-                        <span>{student.name}</span>
-                        {isCrossDayMakeup && (
-                          <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full">
-                            🔄 تعويض ({student.groupDays})
-                          </span>
-                        )}
-                      </td>
-                      <td className="p-3.5 text-slate-300 text-xs">
-                        {student.groupGrade} • {student.groupDays}
-                      </td>
-                      <td className="p-3.5">
-                        <span
-                          className={`font-bold text-xs px-2.5 py-1 rounded-full ${
-                            isPaid
-                              ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
-                              : "bg-rose-500/10 text-rose-400 border border-rose-500/30"
-                          }`}
-                        >
-                          {isPaid ? "✅ مدفوع" : "❌ غير مدفوع"}
-                          {student.customMonthlyFee !== undefined && ` (${student.customMonthlyFee} ج)`}
-                        </span>
-                      </td>
-                      <td className="p-3.5">
-                        <span
-                          className={`font-bold text-xs px-2.5 py-1 rounded-full ${
-                            statusToday === "تأخير"
-                              ? "bg-amber-500/10 text-amber-400 border border-amber-500/30"
-                              : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
-                          }`}
-                        >
-                          {statusToday === "تأخير" ? "🟡 تأخير" : "🟢 حضور"}
-                        </span>
-                      </td>
-                      <td className="p-3.5 font-mono text-slate-300">{formattedTime}</td>
-                      <td className="p-3.5 text-center">
-                        <div className="flex items-center justify-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (isCrossDayMakeup) {
-                                const timeStr = formattedTime !== "--:--" ? ` في تمام الساعة (${formattedTime})` : "";
-                                const msg = `تنبيه من منظومة الأستاذة إيمان الدمشيتي 📐\n` +
-                                  `نفيدكم بعلم أن الطالب/ة: (${student.name})\n` +
-                                  `المقيد في مجموعة: [${student.groupGrade} - ${student.groupDays}]\n` +
-                                  `قد حضر اليوم في مجموعة عكس الأيام: [${selectedGrade} - ${selectedDays}]\n` +
-                                  `حالة التسجيل: (${statusToday})${timeStr}.\n` +
-                                  `تم تسجيل حضوره تعويضياً بنجاح.`;
-                                openWhatsApp(student.parentPhone, msg);
-                              } else {
-                                openWhatsApp(
-                                  student.parentPhone,
-                                  `السلام عليكم ورحمة الله، نفيدكم بتسجيل حضور الطالب/ة (${student.name}) في حصة الرياضيات.`
-                                );
-                              }
-                            }}
-                            className="px-2.5 py-1 rounded-xl bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-white border border-emerald-500/30 text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
-                            title="إرسال رسالة واتساب لولي الأمر"
-                          >
-                            📲 <span className="hidden sm:inline">واتساب</span>
-                          </button>
-                          {onRemoveFromScanner && (
-                            <button
-                              type="button"
-                              onClick={() => onRemoveFromScanner(barcode)}
-                              className="px-2 py-1 rounded-xl bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
-                              title="إزالة من قائمة الاسكانر الحالية"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                              <span className="hidden sm:inline">إزالة</span>
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
+                    <ScannedTableRow
+                      key={barcode}
+                      barcode={barcode}
+                      orderNumber={orderNumber}
+                      student={student}
+                      isPaid={isPaid}
+                      statusToday={statusToday}
+                      formattedTime={formattedTime}
+                      isCrossDayMakeup={isCrossDayMakeup}
+                      onSendWhatsApp={handleSendWhatsApp}
+                      onRemoveFromScanner={onRemoveFromScanner ? handleRemoveFromQueue : undefined}
+                    />
                   );
                 })
               )}

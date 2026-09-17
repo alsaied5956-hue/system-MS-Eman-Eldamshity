@@ -11,7 +11,13 @@
  * 4. Ensures referential integrity with foreign key mapping and barcode caching.
  */
 
-import { supabase, getStudentIdByBarcode, ensureStudentInSupabase, getTodayDateKey } from "../utils/supabaseClient";
+import {
+  supabase,
+  getStudentIdByBarcode,
+  ensureStudentInSupabase,
+  ensureStudentsInSupabaseBulk,
+  getTodayDateKey,
+} from "../utils/supabaseClient";
 import { Student, PaymentRecord, UserAccount, GradeName, GroupDays } from "../types";
 import { getPersistentDeviceId } from "../utils/deviceClient";
 import {
@@ -283,17 +289,19 @@ export async function cloudRecordAttendance(
     throw new Error(`فشل تسجيل الحضور في السحابة: ${error.message}`);
   }
 
-  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger immediately after cloud persistence
-  const timeDisplay = timeIso
-    ? new Date(timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" })
-    : new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
-  const studentInfo = studentFallback || { barcode: b, name: studentName };
+  // ⚡ ASYNCHRONOUS PUSH NOTIFICATION: Trigger in background without blocking UI thread
+  setTimeout(() => {
+    const timeDisplay = timeIso
+      ? new Date(timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" })
+      : new Date().toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
+    const studentInfo = studentFallback || { barcode: b, name: studentName };
 
-  if (status === "تأخير") {
-    triggerAttendanceLateNotification(studentInfo, timeDisplay, dateKey).catch(() => {});
-  } else {
-    triggerAttendancePresentNotification(studentInfo, timeDisplay, dateKey).catch(() => {});
-  }
+    if (status === "تأخير") {
+      triggerAttendanceLateNotification(studentInfo, timeDisplay, dateKey).catch(() => {});
+    } else {
+      triggerAttendancePresentNotification(studentInfo, timeDisplay, dateKey).catch(() => {});
+    }
+  }, 0);
 
   return { barcode: b, status, timeIso };
 }
@@ -311,81 +319,95 @@ export async function cloudFinishGroupAttendance(
   const studentMap = new Map<string, Student>();
   allStudents.forEach((s) => studentMap.set(String(s.barcode).trim(), s));
 
-  const rowsToCommit: any[] = [];
+  const allBarcodes = Array.from(
+    new Set([...absentBarcodes, ...lateBarcodes, ...presentBarcodes].map((b) => String(b).trim()))
+  ).filter(Boolean);
 
-  // 1. Process Absents
-  for (const b of absentBarcodes) {
-    const sObj = studentMap.get(b);
-    const sId = await ensureStudentInSupabase(b, sObj);
-    if (sId) {
-      rowsToCommit.push({
+  if (allBarcodes.length === 0) {
+    return { dateKey, absentBarcodes, lateBarcodes, presentBarcodes };
+  }
+
+  // 1. Parallel Student ID Resolution in a single batch query (Zero loop awaits!)
+  const idMap = await ensureStudentsInSupabaseBulk(
+    allBarcodes.map((b) => ({
+      barcode: b,
+      fallback: studentMap.get(b) || { name: `طالب ${b}` },
+    }))
+  );
+
+  const nowIso = new Date().toISOString();
+  const absentSet = new Set(absentBarcodes.map((b) => String(b).trim()));
+  const lateSet = new Set(lateBarcodes.map((b) => String(b).trim()));
+
+  const rowsToCommit = allBarcodes
+    .map((b) => {
+      const sId = idMap.get(b);
+      if (!sId) return null;
+      const sObj = studentMap.get(b);
+      const status: "حضور" | "تأخير" | "غياب" = absentSet.has(b)
+        ? "غياب"
+        : lateSet.has(b)
+        ? "تأخير"
+        : "حضور";
+
+      return {
         student_id: sId,
         barcode: b,
         student_name: sObj?.name || `طالب ${b}`,
         date_key: dateKey,
-        time_recorded: new Date().toISOString(),
-        status: "غياب",
+        time_recorded: nowIso,
+        status,
         scanned_by: finishedBy,
-      });
+      };
+    })
+    .filter(Boolean);
+
+  // 2. Single Parallel Bulk Database Insertion: save all records (Present, Late, Absent) in one operation
+  if (rowsToCommit.length > 0) {
+    const chunkSize = 500;
+    if (rowsToCommit.length <= chunkSize) {
+      const { error } = await supabase
+        .from("attendance_logs")
+        .upsert(rowsToCommit, { onConflict: "student_id,date_key" });
+
+      if (error) {
+        console.error("[MutationService] Error in bulk attendance insert:", error);
+        throw new Error(`فشل تثبيت حضور المجموعة في السحابة: ${error.message}`);
+      }
+    } else {
+      const chunks = [];
+      for (let i = 0; i < rowsToCommit.length; i += chunkSize) {
+        chunks.push(rowsToCommit.slice(i, i + chunkSize));
+      }
+      const results = await Promise.all(
+        chunks.map((chunk) =>
+          supabase.from("attendance_logs").upsert(chunk, { onConflict: "student_id,date_key" })
+        )
+      );
+      const failed = results.find((r) => r.error);
+      if (failed?.error) {
+        console.error("[MutationService] Error in parallel batch insert:", failed.error);
+        throw new Error(`فشل تثبيت دفعة حضور المجموعة في السحابة: ${failed.error.message}`);
+      }
     }
   }
 
-  // 2. Process Late
-  for (const b of lateBarcodes) {
-    const sObj = studentMap.get(b);
-    const sId = await ensureStudentInSupabase(b, sObj);
-    if (sId) {
-      rowsToCommit.push({
-        student_id: sId,
-        barcode: b,
-        student_name: sObj?.name || `طالب ${b}`,
-        date_key: dateKey,
-        time_recorded: new Date().toISOString(),
-        status: "تأخير",
-        scanned_by: finishedBy,
-      });
-    }
-  }
-
-  // 3. Process Present
-  for (const b of presentBarcodes) {
-    const sObj = studentMap.get(b);
-    const sId = await ensureStudentInSupabase(b, sObj);
-    if (sId) {
-      rowsToCommit.push({
-        student_id: sId,
-        barcode: b,
-        student_name: sObj?.name || `طالب ${b}`,
-        date_key: dateKey,
-        time_recorded: new Date().toISOString(),
-        status: "حضور",
-        scanned_by: finishedBy,
-      });
-    }
-  }
-
-  const chunkSize = 100;
-  for (let i = 0; i < rowsToCommit.length; i += chunkSize) {
-    const chunk = rowsToCommit.slice(i, i + chunkSize);
-    const { error } = await supabase
-      .from("attendance_logs")
-      .upsert(chunk, { onConflict: "student_id,date_key" });
-
-    if (error) {
-      console.error("[MutationService] Error committing group attendance chunk:", error);
-      throw new Error(`فشل تثبيت حضور المجموعة في السحابة: ${error.message}`);
-    }
-  }
-
-  // ⚡ HIGH-PRIORITY FCM PUSH: Trigger for all absents & lates after cloud commit
-  for (const b of absentBarcodes) {
-    const sObj = studentMap.get(b) || { barcode: b, name: `طالب ${b}` };
-    triggerAttendanceAbsentNotification(sObj, dateKey).catch(() => {});
-  }
-  for (const b of lateBarcodes) {
-    const sObj = studentMap.get(b) || { barcode: b, name: `طالب ${b}` };
-    triggerAttendanceLateNotification(sObj, "04:30 م", dateKey).catch(() => {});
-  }
+  // 3. Asynchronous Push & Platform Notifications:
+  // Offload to background thread via setTimeout so UI thread is completely unblocked!
+  setTimeout(() => {
+    (async () => {
+      const notifyPromises = [];
+      for (const b of absentBarcodes) {
+        const sObj = studentMap.get(b) || { barcode: b, name: `طالب ${b}` };
+        notifyPromises.push(triggerAttendanceAbsentNotification(sObj, dateKey).catch(() => {}));
+      }
+      for (const b of lateBarcodes) {
+        const sObj = studentMap.get(b) || { barcode: b, name: `طالب ${b}` };
+        notifyPromises.push(triggerAttendanceLateNotification(sObj, "04:30 م", dateKey).catch(() => {}));
+      }
+      await Promise.allSettled(notifyPromises);
+    })().catch(() => {});
+  }, 0);
 
   return { dateKey, absentBarcodes, lateBarcodes, presentBarcodes };
 }

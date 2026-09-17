@@ -853,17 +853,7 @@ export default function App() {
     const todayKey = getTodayKey();
 
     try {
-      // ⚡ STRICT CLOUD-FIRST: Await Supabase insertion into attendance_logs table
-      await cloudRecordAttendance(
-        cleanBarcode,
-        status,
-        timeIso,
-        student?.name || `طالب ${cleanBarcode}`,
-        currentUser?.username || "الماسح",
-        student
-      );
-
-      // 1. Immediately update synchronous references (immune to rapid scan drops)
+      // 1. Optimistic UI Update: Immediately update state in 0ms (zero input lag)
       if (!scanLogOrderRef.current.includes(cleanBarcode)) {
         scanLogOrderRef.current = [cleanBarcode, ...scanLogOrderRef.current];
       }
@@ -886,7 +876,7 @@ export default function App() {
       const prevStatus = attendanceTodayRef.current[cleanBarcode];
       let updatedStudents = appStudentsRef.current;
       
-      // Only increment attendance days if student was not already marked present today
+      // Increment attendance days if student was not already marked present today
       if (!prevStatus || prevStatus === "غائب") {
         updatedStudents = appStudentsRef.current.map((s) => {
           if (String(s.barcode).trim() === cleanBarcode) {
@@ -901,7 +891,7 @@ export default function App() {
         setStudents(updatedStudents);
       }
 
-      // 2. Functional React updates ensure state is never dropped in rapid succession
+      // Functional React state updates
       setAttendanceToday((prev) => ({ ...prev, [cleanBarcode]: status }));
       setAttendanceHistory((prev) => ({
         ...prev,
@@ -913,7 +903,7 @@ export default function App() {
       setScanLogOrder((prev) => (prev.includes(cleanBarcode) ? prev : [cleanBarcode, ...prev]));
       setScanLogTimes((prev) => ({ ...prev, [cleanBarcode]: timeIso }));
 
-      // ⚡ Dual-Sync to Firebase immediately with sourceDeviceId
+      // Dual-Sync to Firebase immediately with sourceDeviceId
       dualSyncLiveScan({
         barcode: cleanBarcode,
         name: student.name,
@@ -937,9 +927,20 @@ export default function App() {
         false,
         true
       );
+
+      // ⚡ Asynchronous Cloud Persistence: non-blocking background write
+      cloudRecordAttendance(
+        cleanBarcode,
+        status,
+        timeIso,
+        student?.name || `طالب ${cleanBarcode}`,
+        currentUser?.username || "الماسح",
+        student
+      ).catch((err) => {
+        console.error("[App] Asynchronous cloud scan error:", err);
+      });
     } catch (err: any) {
-      console.error("[App] Failed to commit scan attendance to cloud:", err);
-      alert(`❌ فشل تسجيل الحضور في السحابة: ${err?.message || "خطأ في الاتصال"}`);
+      console.error("[App] Failed to commit scan attendance:", err);
     }
   }, [payments, currentUser]);
 
@@ -948,7 +949,7 @@ export default function App() {
     return await flushPendingSyncToCloud(true);
   }, []);
 
-  // Handler: Finish and Lock Group Session with strict Cloud-First commit
+  // Handler: Finish and Lock Group Session with optimistic UI update and single parallel bulk commit
   const handleFinishGroup = useCallback(async (
     grade: GradeName,
     days: GroupDays,
@@ -956,22 +957,24 @@ export default function App() {
     lateList: { student: Student; message: string; type?: "تأخير" }[],
     crossDayList?: { student: Student; message: string; type?: "عكس_أيام" }[]
   ) => {
-    // 1️⃣ Live Event Pipeline: Coordinated batch push to `live_events/today`
-    const batchEvents = [
-      ...(absentList || []).map((a) => ({
-        studentId: a.student.barcode,
-        status: "غائب" as const,
-        timestamp: Date.now(),
-      })),
-      ...(lateList || []).map((l) => ({
-        studentId: l.student.barcode,
-        status: "تأخير" as const,
-        timestamp: Date.now(),
-      })),
-    ];
-    if (batchEvents.length > 0) {
-      pushLiveAttendanceBatch(batchEvents);
-    }
+    // 1️⃣ Live Event Pipeline: Coordinated batch push to `live_events/today` in background
+    setTimeout(() => {
+      const batchEvents = [
+        ...(absentList || []).map((a) => ({
+          studentId: a.student.barcode,
+          status: "غائب" as const,
+          timestamp: Date.now(),
+        })),
+        ...(lateList || []).map((l) => ({
+          studentId: l.student.barcode,
+          status: "تأخير" as const,
+          timestamp: Date.now(),
+        })),
+      ];
+      if (batchEvents.length > 0) {
+        pushLiveAttendanceBatch(batchEvents);
+      }
+    }, 0);
 
     const groupStudents = (appStudentsRef.current || students).filter(
       (s) => s.groupGrade === grade && s.groupDays === days
@@ -1011,8 +1014,55 @@ export default function App() {
       .map((s) => String(s.barcode).trim())
       .filter((b) => updatedToday[b] === "حضور");
 
+    // ⚡ OPTIMISTIC UI UPDATE:
+    // Snapshot current state for rollback if network operation fails
+    const prevScanOrder = scanLogOrderRef.current;
+    const prevScanTimes = scanLogTimesRef.current;
+    const prevToday = attendanceTodayRef.current;
+    const prevHistory = attendanceHistoryRef.current;
+    const prevStudents = appStudentsRef.current;
+
+    const groupBarcodes = new Set([
+      ...groupStudents.map((s) => String(s.barcode).trim()),
+      ...(crossDayList || []).map((c) => String(c.student.barcode).trim()),
+    ]);
+    const clearedScanOrder = (prevScanOrder || []).filter((b) => !groupBarcodes.has(b));
+
+    const updatedHistory = {
+      ...attendanceHistory,
+      [todayKey]: updatedToday,
+    };
+
+    const updatedStudents = (appStudentsRef.current || students).map((s) => {
+      const b = String(s.barcode).trim();
+      if (absentBarcodes.has(b) && updatedToday[b] === "غائب") {
+        const wasAbsent = attendanceToday[b] === "غائب";
+        if (!wasAbsent) {
+          return {
+            ...s,
+            totalAbsentDays: (s.totalAbsentDays || 0) + 1,
+            totalAttendanceDays: Math.max(0, (s.totalAttendanceDays || 0) - 1),
+          };
+        }
+      }
+      return s;
+    });
+
+    // Apply state locally in 0ms (Instant Optimistic UI update)
+    attendanceTodayRef.current = updatedToday;
+    attendanceHistoryRef.current = updatedHistory;
+    appStudentsRef.current = updatedStudents;
+    scanLogOrderRef.current = clearedScanOrder;
+
+    setAttendanceToday(updatedToday);
+    setAttendanceHistory(updatedHistory);
+    setStudents(updatedStudents);
+    setScanLogOrder(clearedScanOrder);
+
+    saveAttendanceAndStudentsBatch(updatedToday, clearedScanOrder, prevScanTimes, updatedStudents, true);
+
     try {
-      // ⚡ STRICT CLOUD-FIRST: Await Supabase batch attendance logs
+      // ⚡ Single Parallel Bulk Database Insertion: save all records in one Supabase call
       await cloudFinishGroupAttendance(
         grade,
         days,
@@ -1024,63 +1074,41 @@ export default function App() {
         groupStudents
       );
 
-      const updatedHistory = {
-        ...attendanceHistory,
-        [todayKey]: updatedToday,
-      };
-
-      const updatedStudents = (appStudentsRef.current || students).map((s) => {
-        const b = String(s.barcode).trim();
-        if (absentBarcodes.has(b) && updatedToday[b] === "غائب") {
-          const wasAbsent = attendanceToday[b] === "غائب";
-          if (!wasAbsent) {
-            return {
-              ...s,
-              totalAbsentDays: (s.totalAbsentDays || 0) + 1,
-              totalAttendanceDays: Math.max(0, (s.totalAttendanceDays || 0) - 1),
-            };
-          }
-        }
-        return s;
-      });
-
-      const currentScanOrder = scanLogOrderRef.current.length > 0 ? scanLogOrderRef.current : scanLogOrder;
-      const currentScanTimes = Object.keys(scanLogTimesRef.current).length > 0 ? scanLogTimesRef.current : scanLogTimes;
-
-      attendanceTodayRef.current = updatedToday;
-      attendanceHistoryRef.current = updatedHistory;
-      appStudentsRef.current = updatedStudents;
-      scanLogOrderRef.current = currentScanOrder;
-      scanLogTimesRef.current = currentScanTimes;
-
-      setAttendanceToday(updatedToday);
-      setAttendanceHistory(updatedHistory);
-      setStudents(updatedStudents);
-      setScanLogOrder(currentScanOrder);
-      setScanLogTimes(currentScanTimes);
-
-      saveAttendanceAndStudentsBatch(updatedToday, currentScanOrder, currentScanTimes, updatedStudents, true);
-
-      dualSyncGroupFinished({
-        grade,
-        days,
-        absentBarcodes: Array.from(absentBarcodes).filter(b => updatedToday[b] === "غائب"),
-        lateBarcodes: Array.from(lateBarcodes),
-        presentBarcodes: presentBarcodesList,
-        dateKey: todayKey,
-        finishedBy: currentUser?.username || "الماسح",
-        allStudents: groupStudents,
-      });
+      // Dual-sync in background without blocking
+      setTimeout(() => {
+        dualSyncGroupFinished({
+          grade,
+          days,
+          absentBarcodes: Array.from(absentBarcodes).filter(b => updatedToday[b] === "غائب"),
+          lateBarcodes: Array.from(lateBarcodes),
+          presentBarcodes: presentBarcodesList,
+          dateKey: todayKey,
+          finishedBy: currentUser?.username || "الماسح",
+          allStudents: groupStudents,
+        });
+      }, 0);
 
       setSyncBanner({
         show: true,
         type: "online-synced",
-        message: `⚡ تم تثبيت حضور مجموعة (${grade} - ${days}) في السحابة وانعكاسها على كافة الأجهزة!`,
+        message: `⚡ تم تثبيت حضور مجموعة (${grade} - ${days}) في السحابة وتفريغ قائمة الحصة فورياً!`,
       });
       setTimeout(() => setSyncBanner(null), 4000);
     } catch (err: any) {
-      console.error("[App] Failed to commit group attendance to cloud:", err);
-      alert(`❌ فشل تثبيت حضور المجموعة في السحابة: ${err?.message || "خطأ في الاتصال"}`);
+      console.error("[App] Failed to commit group attendance to cloud, rolling back:", err);
+      // Rollback to previous state on failure
+      attendanceTodayRef.current = prevToday;
+      attendanceHistoryRef.current = prevHistory;
+      appStudentsRef.current = prevStudents;
+      scanLogOrderRef.current = prevScanOrder;
+
+      setAttendanceToday(prevToday);
+      setAttendanceHistory(prevHistory);
+      setStudents(prevStudents);
+      setScanLogOrder(prevScanOrder);
+
+      saveAttendanceAndStudentsBatch(prevToday, prevScanOrder, prevScanTimes, prevStudents, false);
+      throw err;
     }
   }, [attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, students, currentUser]);
 

@@ -610,6 +610,117 @@ export async function ensureStudentInSupabase(
   return null;
 }
 
+/**
+ * Bulk resolves student IDs from Supabase in a single batch query.
+ * Auto-creates any missing students in a single bulk upsert.
+ * Zero individual loop awaits!
+ */
+export async function ensureStudentsInSupabaseBulk(
+  items: Array<{
+    barcode: string;
+    fallback?: {
+      name?: string;
+      phone?: string;
+      parentPhone?: string;
+      groupGrade?: string;
+      groupDays?: string;
+      groupTime?: string;
+      monthlyFee?: number;
+      discount?: number;
+      notes?: string;
+      isActive?: boolean;
+    };
+  }>
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (!items || items.length === 0) return result;
+
+  const allBarcodes = Array.from(new Set(items.map((it) => String(it.barcode).trim()))).filter(Boolean);
+
+  // 1. Populate already cached IDs
+  const uncached: string[] = [];
+  allBarcodes.forEach((b) => {
+    const cached = barcodeToIdCache.get(b);
+    if (cached) {
+      result.set(b, cached);
+    } else {
+      uncached.push(b);
+    }
+  });
+
+  // 2. Fetch all missing from Supabase in a single query
+  if (uncached.length > 0) {
+    try {
+      const { data: found, error } = await supabase
+        .from("students")
+        .select("id, barcode")
+        .in("barcode", uncached);
+
+      if (!error && found) {
+        found.forEach((row) => {
+          if (row.barcode && row.id) {
+            const cleanB = String(row.barcode).trim();
+            barcodeToIdCache.set(cleanB, row.id);
+            result.set(cleanB, row.id);
+          }
+        });
+      }
+    } catch (err) {
+      console.warn("[SupabaseClient] Bulk student query exception:", err);
+    }
+  }
+
+  // 3. Any still missing: auto-create in a single bulk upsert
+  const stillMissing = allBarcodes.filter((b) => !result.has(b));
+  if (stillMissing.length > 0) {
+    const fallbackMap = new Map<string, any>();
+    items.forEach((it) => {
+      const b = String(it.barcode).trim();
+      if (!fallbackMap.has(b)) {
+        fallbackMap.set(b, it.fallback);
+      }
+    });
+
+    const newRows = stillMissing.map((b) => {
+      const fb = fallbackMap.get(b);
+      return {
+        barcode: b,
+        name: fb?.name || `طالب ${b}`,
+        phone: String(fb?.phone || ""),
+        parent_phone: String(fb?.parentPhone || fb?.phone || "00000000000"),
+        grade: fb?.groupGrade || "غير محدد",
+        group_days: fb?.groupDays || "غير محدد",
+        group_time: fb?.groupTime || "04:00 م",
+        monthly_fee: Number(fb?.monthlyFee) || 0,
+        discount: Number(fb?.discount) || 0,
+        notes: fb?.notes || "",
+        is_active: fb?.isActive !== false,
+      };
+    });
+
+    try {
+      const { data: created, error } = await supabase
+        .from("students")
+        .upsert(newRows, { onConflict: "barcode" })
+        .select("id, barcode");
+
+      if (!error && created) {
+        created.forEach((row) => {
+          if (row.barcode && row.id) {
+            const cleanB = String(row.barcode).trim();
+            barcodeToIdCache.set(cleanB, row.id);
+            result.set(cleanB, row.id);
+          }
+        });
+      }
+    } catch (err) {
+      console.warn("[SupabaseClient] Bulk student upsert exception:", err);
+    }
+  }
+
+  return result;
+}
+
 /** Save single attendance record to Supabase with status normalization */
 export async function saveAttendanceToSupabase(record: {
   barcode: string;
@@ -648,8 +759,8 @@ export async function saveAttendanceToSupabase(record: {
 }
 
 /**
- * Bulk save group attendance to Supabase in parallel chunks
- * Called when group attendance is finalized or absence is sent
+ * Bulk save group attendance to Supabase in a single parallel bulk insertion.
+ * Eliminates serial awaiting in loops for instant performance.
  */
 export async function saveBulkAttendanceToSupabase(
   records: Array<{
@@ -663,33 +774,61 @@ export async function saveBulkAttendanceToSupabase(
 ): Promise<void> {
   if (!records || records.length === 0) return;
 
-  const rowsToInsert = [];
-  for (const rec of records) {
-    const sId = await ensureStudentInSupabase(rec.barcode, rec.studentFallback || { name: rec.studentName });
-    if (!sId) continue;
-    const normalizedStatus: "حضور" | "تأخير" | "غياب" =
-      rec.status === "غائب" || rec.status === "غياب"
-        ? "غياب"
-        : rec.status === "تأخير"
-        ? "تأخير"
-        : "حضور";
-    rowsToInsert.push({
-      student_id: sId,
-      barcode: String(rec.barcode).trim(),
-      student_name: rec.studentName,
-      date_key: rec.dateKey,
-      time_recorded: new Date().toISOString(),
-      status: normalizedStatus,
-      scanned_by: rec.scannedBy || "admin",
-    });
-  }
+  // 1. Resolve all student IDs in a single bulk operation
+  const idMap = await ensureStudentsInSupabaseBulk(
+    records.map((r) => ({
+      barcode: r.barcode,
+      fallback: r.studentFallback || { name: r.studentName },
+    }))
+  );
 
-  const chunkSize = 100;
-  for (let i = 0; i < rowsToInsert.length; i += chunkSize) {
-    const chunk = rowsToInsert.slice(i, i + chunkSize);
-    await supabase
+  const nowIso = new Date().toISOString();
+  const rowsToInsert = records
+    .map((rec) => {
+      const b = String(rec.barcode).trim();
+      const sId = idMap.get(b);
+      if (!sId) return null;
+
+      const normalizedStatus: "حضور" | "تأخير" | "غياب" =
+        rec.status === "غائب" || rec.status === "غياب"
+          ? "غياب"
+          : rec.status === "تأخير"
+          ? "تأخير"
+          : "حضور";
+
+      return {
+        student_id: sId,
+        barcode: b,
+        student_name: rec.studentName,
+        date_key: rec.dateKey,
+        time_recorded: nowIso,
+        status: normalizedStatus,
+        scanned_by: rec.scannedBy || "admin",
+      };
+    })
+    .filter(Boolean);
+
+  if (rowsToInsert.length === 0) return;
+
+  // 2. Single bulk insertion (or parallel chunk insertion if very large)
+  const chunkSize = 500;
+  if (rowsToInsert.length <= chunkSize) {
+    const { error } = await supabase
       .from("attendance_logs")
-      .upsert(chunk, { onConflict: "student_id,date_key" });
+      .upsert(rowsToInsert, { onConflict: "student_id,date_key" });
+    if (error) {
+      console.error("[SupabaseClient] Bulk attendance upsert error:", error.message);
+    }
+  } else {
+    const chunks = [];
+    for (let i = 0; i < rowsToInsert.length; i += chunkSize) {
+      chunks.push(rowsToInsert.slice(i, i + chunkSize));
+    }
+    await Promise.all(
+      chunks.map((chunk) =>
+        supabase.from("attendance_logs").upsert(chunk, { onConflict: "student_id,date_key" })
+      )
+    );
   }
 }
 
