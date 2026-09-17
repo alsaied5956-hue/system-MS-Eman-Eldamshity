@@ -673,13 +673,20 @@ async function startServer() {
       };
     }
 
+    // Active incoming students must NEVER be wiped out by old deletedBarcodes tombstones!
+    const activeIncomingBarcodes = new Set(
+      (Array.isArray(data?.students) ? data.students : []).map((s: any) => String(s?.barcode || "").trim())
+    );
+
     // Merge tombstones and sanitize stateToSave so deleted records never resurrect
     const allDeletedBarcodes = Array.from(
       new Set([
         ...(cachedServerState?.deletedBarcodes || []),
         ...(data?.deletedBarcodes || []),
       ])
-    ).map((b) => String(b).trim());
+    )
+      .map((b) => String(b).trim())
+      .filter((b) => !activeIncomingBarcodes.has(b)); // Purge re-added students
     const deletedBarcodesSet = new Set(allDeletedBarcodes);
 
     const allDeletedPaymentKeys = Array.from(
@@ -835,6 +842,21 @@ async function startServer() {
     });
 
     res.json({ ok: true, deletedBarcode: b });
+  });
+
+  // 4b. Immediate Tombstone Restoration / Clean when student is re-added
+  app.post("/api/sync/restore-tombstone", (req: Request, res: Response) => {
+    const { barcode } = req.body;
+    if (barcode && cachedServerState && typeof cachedServerState === "object") {
+      const b = String(barcode).trim();
+      cachedServerState.deletedBarcodes = (cachedServerState.deletedBarcodes || []).filter(
+        (code: string) => String(code).trim() !== b
+      );
+      try {
+        fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(cachedServerState), "utf-8");
+      } catch {}
+    }
+    res.json({ ok: true });
   });
 
   // 4c. Immediate Server-Side Payment Record Deletion with SSE Broadcasting

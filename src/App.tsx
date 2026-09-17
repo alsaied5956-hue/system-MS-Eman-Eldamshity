@@ -33,6 +33,8 @@ import {
   forceCloudFullRefresh,
   getSyncStatus,
   clearAllSystemData,
+  loadLocalData,
+  purgeTombstoneBarcode,
   autoPushLocalDiskOnStartup,
   pullLatestCloudDataImmediately,
   hydrateFromIndexedDB,
@@ -379,7 +381,29 @@ export default function App() {
     const unsubscribe = subscribeToCloudData(
       (cloudData) => {
         if (cloudData) {
-          if (cloudData.students) setStudents(cloudData.students);
+          if (Array.isArray(cloudData.students)) {
+            const localDel = new Set((loadLocalData().deletedBarcodes || []).map((b) => String(b).trim()));
+            const remoteDel = new Set((cloudData.deletedBarcodes || []).map((b) => String(b).trim()));
+            const allDel = new Set([...localDel, ...remoteDel]);
+
+            setStudents((prev) => {
+              // Never resurrect deleted students
+              const cleanPrev = prev.filter((s) => !allDel.has(String(s.barcode).trim()));
+              const prevBarcodes = new Set(cleanPrev.map((s) => String(s.barcode).trim()));
+
+              // Only accept cloud students if not deleted and not already existing
+              const toAdd = cloudData.students!.filter(
+                (cs) => cs && cs.barcode && !allDel.has(String(cs.barcode).trim()) && !prevBarcodes.has(String(cs.barcode).trim())
+              );
+
+              if (toAdd.length === 0 && cleanPrev.length === prev.length) {
+                return prev;
+              }
+              const next = [...cleanPrev, ...toAdd];
+              appStudentsRef.current = next;
+              return next;
+            });
+          }
           if (cloudData.attendanceToday) setAttendanceToday(cloudData.attendanceToday);
           if (cloudData.attendanceHistory) setAttendanceHistory(cloudData.attendanceHistory);
           if (Array.isArray(cloudData.scanLogOrder)) setScanLogOrder(cloudData.scanLogOrder);
@@ -406,7 +430,25 @@ export default function App() {
           return;
         }
         const d = customEvent.detail;
-        if (d.students) setStudents(d.students);
+        if (Array.isArray(d.students)) {
+          const localDel = new Set((loadLocalData().deletedBarcodes || []).map((b) => String(b).trim()));
+          const remoteDel = new Set((d.deletedBarcodes || []).map((b) => String(b).trim()));
+          const allDel = new Set([...localDel, ...remoteDel]);
+
+          setStudents((prev) => {
+            const cleanPrev = prev.filter((s) => !allDel.has(String(s.barcode).trim()));
+            const prevBarcodes = new Set(cleanPrev.map((s) => String(s.barcode).trim()));
+            const toAdd = d.students.filter(
+              (s: any) => s && s.barcode && !allDel.has(String(s.barcode).trim()) && !prevBarcodes.has(String(s.barcode).trim())
+            );
+            if (toAdd.length === 0 && cleanPrev.length === prev.length) {
+              return prev;
+            }
+            const next = [...cleanPrev, ...toAdd];
+            appStudentsRef.current = next;
+            return next;
+          });
+        }
         if (d.attendanceToday) setAttendanceToday(d.attendanceToday);
         if (d.attendanceHistory) setAttendanceHistory(d.attendanceHistory);
         if (Array.isArray(d.scanLogOrder)) setScanLogOrder(d.scanLogOrder);
@@ -1153,22 +1195,32 @@ export default function App() {
 
   // Handler: Add Single Student
   const handleAddStudent = useCallback(async (newStudent: Student, cardFee = 0) => {
+    const cleanBarcode = String(newStudent.barcode).trim();
     try {
-      // ⚡ STRICT CLOUD-FIRST: Await Supabase insertion
-      await cloudAddStudent(newStudent);
+      // 1. Purge any tombstone for this barcode so it is never dropped or blocked
+      purgeTombstoneBarcode(cleanBarcode);
 
-      const updated = [newStudent, ...students];
-      setStudents(updated);
-      saveStudentsData(updated);
+      // 2. ⚡ STRICT CLOUD-FIRST: Await Supabase insertion
+      const addResult = await cloudAddStudent(newStudent, cardFee, currentUser?.username || "admin");
+      const committedStudent = addResult?.student || newStudent;
 
-      // Dual-Sync for backward compatibility
-      dualSyncStudentSave(newStudent, "add");
+      // 3. Functional state update to avoid stale closures
+      setStudents((prev) => {
+        const filtered = prev.filter((s) => String(s.barcode).trim() !== cleanBarcode);
+        const updated = [committedStudent, ...filtered];
+        appStudentsRef.current = updated;
+        saveStudentsData(updated);
+        return updated;
+      });
+
+      // 4. Dual-Sync for multi-device broadcast
+      dualSyncStudentSave(committedStudent, "add");
 
       if (cardFee > 0) {
         const today = getTodayKey();
         const monthKey = getCurrentMonthKey();
-        const newPayment: PaymentRecord = {
-          barcode: newStudent.barcode,
+        const newPayment: PaymentRecord = addResult?.payment || {
+          barcode: cleanBarcode,
           month: monthKey,
           monthKey,
           amount: cardFee,
@@ -1180,42 +1232,45 @@ export default function App() {
         };
 
         await cloudRecordPayment({
-          barcode: newStudent.barcode,
+          barcode: cleanBarcode,
           amount: cardFee,
           monthKey,
           date: today,
           note: newPayment.note,
           recordedBy: currentUser?.username || "admin",
-          studentFallback: newStudent,
+          studentFallback: committedStudent,
         });
 
-        const monthData = payments[monthKey] || {};
-        const updatedPayments = {
-          ...payments,
-          [monthKey]: {
-            ...monthData,
-            [`card_${newStudent.barcode}`]: newPayment,
-          },
-        };
-        setPayments(updatedPayments);
-        savePaymentsData(updatedPayments);
+        setPayments((prev) => {
+          const monthData = prev[monthKey] || {};
+          const updatedPayments = {
+            ...prev,
+            [monthKey]: {
+              ...monthData,
+              [`card_${cleanBarcode}`]: newPayment,
+            },
+          };
+          paymentsRef.current = updatedPayments;
+          savePaymentsData(updatedPayments);
+          return updatedPayments;
+        });
 
         dualSyncPaymentRecord({
-          barcode: newStudent.barcode,
+          barcode: cleanBarcode,
           monthKey,
           amount: cardFee,
           date: today,
           time: newPayment.time,
           note: newPayment.note,
           recordedBy: currentUser?.username || "admin",
-          studentFallback: newStudent,
+          studentFallback: committedStudent,
         });
       }
     } catch (err: any) {
       console.error("[App] Failed to add student to cloud:", err);
       alert(`❌ فشل إضافة الطالب في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
-  }, [students, payments, currentUser]);
+  }, [currentUser]);
 
   // Handler: Save WhatsApp Group Link per Grade
   const handleSaveGradeWhatsAppLink = useCallback((grade: string, link: string) => {
@@ -1227,9 +1282,17 @@ export default function App() {
   const handleBulkImport = useCallback(async (newStudentsList: Student[]) => {
     try {
       await cloudBulkImportStudents(newStudentsList);
-      const updated = [...newStudentsList, ...students];
-      setStudents(updated);
-      saveStudentsData(updated);
+      const activeBarcodes = new Set(newStudentsList.map((s) => String(s.barcode).trim()));
+      newStudentsList.forEach((s) => purgeTombstoneBarcode(s.barcode));
+
+      setStudents((prev) => {
+        const filtered = prev.filter((s) => !activeBarcodes.has(String(s.barcode).trim()));
+        const updated = [...newStudentsList, ...filtered];
+        appStudentsRef.current = updated;
+        saveStudentsData(updated);
+        return updated;
+      });
+
       dualSyncBulkStudents(newStudentsList);
       setSyncBanner({
         show: true,
@@ -1241,80 +1304,93 @@ export default function App() {
       console.error("[App] Failed to bulk import students to cloud:", err);
       alert(`❌ فشل استيراد الطلاب سحابياً: ${err?.message || "خطأ غير معروف"}`);
     }
-  }, [students]);
+  }, []);
 
   // Handler: Update Student Info (with full barcode migration)
   const handleUpdateStudent = useCallback(async (oldBarcode: string, updatedStudent: Student) => {
     try {
       await cloudUpdateStudent(oldBarcode, updatedStudent);
 
-      const updated = students.map((s) => (s.barcode === oldBarcode ? updatedStudent : s));
-      setStudents(updated);
+      setStudents((prev) => {
+        const updated = prev.map((s) => (s.barcode === oldBarcode ? updatedStudent : s));
+        appStudentsRef.current = updated;
 
-      if (oldBarcode !== updatedStudent.barcode) {
-        // Migrate attendance today
-        const newAttToday = { ...attendanceToday };
-        if (newAttToday[oldBarcode]) {
-          newAttToday[updatedStudent.barcode] = newAttToday[oldBarcode];
-          delete newAttToday[oldBarcode];
-          setAttendanceToday(newAttToday);
+        if (oldBarcode !== updatedStudent.barcode) {
+          // Migrate attendance today
+          const newAttToday = { ...attendanceToday };
+          if (newAttToday[oldBarcode]) {
+            newAttToday[updatedStudent.barcode] = newAttToday[oldBarcode];
+            delete newAttToday[oldBarcode];
+            setAttendanceToday(newAttToday);
+          }
+
+          // Migrate scan log
+          const newScanOrder = scanLogOrder.map((b) => (b === oldBarcode ? updatedStudent.barcode : b));
+          const newScanTimes = { ...scanLogTimes };
+          if (newScanTimes[oldBarcode]) {
+            newScanTimes[updatedStudent.barcode] = newScanTimes[oldBarcode];
+            delete newScanTimes[oldBarcode];
+          }
+          setScanLogOrder(newScanOrder);
+          setScanLogTimes(newScanTimes);
+
+          saveAttendanceAndStudentsBatch(newAttToday, newScanOrder, newScanTimes, updated);
+
+          dualSyncStudentDelete(oldBarcode);
+          dualSyncStudentSave(updatedStudent, "add");
+        } else {
+          saveStudentsData(updated);
+          dualSyncStudentSave(updatedStudent, "update");
         }
-
-        // Migrate scan log
-        const newScanOrder = scanLogOrder.map((b) => (b === oldBarcode ? updatedStudent.barcode : b));
-        const newScanTimes = { ...scanLogTimes };
-        if (newScanTimes[oldBarcode]) {
-          newScanTimes[updatedStudent.barcode] = newScanTimes[oldBarcode];
-          delete newScanTimes[oldBarcode];
-        }
-        setScanLogOrder(newScanOrder);
-        setScanLogTimes(newScanTimes);
-
-        saveAttendanceAndStudentsBatch(newAttToday, newScanOrder, newScanTimes, updated);
-
-        dualSyncStudentDelete(oldBarcode);
-        dualSyncStudentSave(updatedStudent, "add");
-      } else {
-        saveStudentsData(updated);
-        dualSyncStudentSave(updatedStudent, "update");
-      }
+        return updated;
+      });
     } catch (err: any) {
       console.error("[App] Failed to update student in cloud:", err);
       alert(`❌ فشل تحديث بيانات الطالب في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
-  }, [students, attendanceToday, scanLogOrder, scanLogTimes]);
+  }, [attendanceToday, scanLogOrder, scanLogTimes]);
 
   // Handler: Delete Single Student
   const handleDeleteStudent = useCallback(async (barcode: string) => {
-    const student = students.find((s) => s.barcode === barcode);
+    const b = String(barcode).trim();
+    const currentList = appStudentsRef.current || [];
+    const student = currentList.find((s) => String(s.barcode).trim() === b);
     try {
-      await cloudDeleteStudent(barcode);
+      // 1. Delete from Supabase PostgreSQL
+      await cloudDeleteStudent(b, student?.id);
 
-      const updated = students.filter((s) => s.barcode !== barcode);
-      setStudents(updated);
-      saveStudentsData(updated, barcode);
+      // 2. Functional state update
+      setStudents((prev) => {
+        const updated = prev.filter((s) => String(s.barcode).trim() !== b);
+        appStudentsRef.current = updated;
+        saveStudentsData(updated, b);
+        return updated;
+      });
 
-      // Clean up local scans and today's attendance for the deleted student
+      // 3. Clean up local scans and today's attendance for the deleted student
       setAttendanceToday((prev) => {
-        if (!prev[barcode]) return prev;
+        if (!prev[b]) return prev;
         const next = { ...prev };
-        delete next[barcode];
+        delete next[b];
+        attendanceTodayRef.current = next;
         return next;
       });
-      setScanLogOrder((prev) => prev.filter((b) => b !== barcode));
+      setScanLogOrder((prev) => prev.filter((code) => code !== b));
       setScanLogTimes((prev) => {
-        if (!prev[barcode]) return prev;
+        if (!prev[b]) return prev;
         const next = { ...prev };
-        delete next[barcode];
+        delete next[b];
+        scanLogTimesRef.current = next;
         return next;
       });
 
-      dualSyncStudentDelete(barcode, student?.id);
+      // 4. Multi-channel broadcast & tombstone propagation
+      dualSyncStudentDelete(b, student?.id);
     } catch (err: any) {
       console.error("[App] Failed to delete student from cloud:", err);
       alert(`❌ فشل حذف الطالب من السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
-  }, [students]);
+  }, []);
 
   // Handler: Clear All Data
   const handleClearAllData = useCallback(() => {

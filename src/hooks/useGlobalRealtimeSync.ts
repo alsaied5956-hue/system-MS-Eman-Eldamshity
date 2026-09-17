@@ -23,6 +23,7 @@ import { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase, getTodayDateKey } from "../utils/supabaseClient";
 import { Student, PaymentRecord, UserAccount, GradeName } from "../types";
 import { getPersistentDeviceId, getPersistentDeviceName } from "../utils/deviceClient";
+import { saveStudentsData } from "../utils/storage";
 
 export interface GlobalRealtimeSyncProps {
   setStudents: Dispatch<SetStateAction<Student[]>>;
@@ -183,11 +184,14 @@ export function useGlobalRealtimeSync({
           };
 
           setStudents((prev) => {
+            let updated: Student[];
             if (prev.some((s) => s.barcode === barcode)) {
-              return prev.map((s) => (s.barcode === barcode ? { ...s, ...newStudent } : s));
+              updated = prev.map((s) => (s.barcode === barcode ? { ...s, ...newStudent } : s));
+            } else {
+              updated = [newStudent, ...prev];
             }
-            const updated = [newStudent, ...prev];
             appStudentsRef.current = updated;
+            saveStudentsData(updated);
             return updated;
           });
 
@@ -221,6 +225,7 @@ export function useGlobalRealtimeSync({
               return s;
             });
             appStudentsRef.current = updated;
+            saveStudentsData(updated);
             return updated;
           });
 
@@ -244,6 +249,7 @@ export function useGlobalRealtimeSync({
               return true;
             });
             appStudentsRef.current = updated;
+            saveStudentsData(updated, barcode);
             return updated;
           });
 

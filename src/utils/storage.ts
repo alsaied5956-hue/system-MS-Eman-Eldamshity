@@ -1389,13 +1389,23 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   const localScanTime = parseTimestamp(local.scanLogUpdatedAt);
   const cloudScanTime = parseTimestamp(cloud.scanLogUpdatedAt);
 
+  // Active students in local or cloud must not be killed by obsolete tombstones
+  const localActiveBarcodes = new Set((local.students || []).map((s) => String(s.barcode).trim()));
+  const cloudActiveBarcodes = new Set((Array.isArray(cloud.students) ? cloud.students : []).map((s) => String(s?.barcode).trim()));
+
   // Union of deleted tombstones to prevent deleted records from resurrecting as zombies
   const deletedBarcodes = Array.from(
     new Set([
       ...(Array.isArray(local.deletedBarcodes) ? local.deletedBarcodes : []),
       ...(Array.isArray(cloud.deletedBarcodes) ? cloud.deletedBarcodes : []),
     ])
-  );
+  ).filter((b) => {
+    // If local was updated after cloud, local active students win over cloud tombstones
+    if (localTime >= cloudTime && localActiveBarcodes.has(b)) return false;
+    // If cloud was updated after local, cloud active students win over local tombstones
+    if (cloudTime > localTime && cloudActiveBarcodes.has(b)) return false;
+    return true;
+  });
   const deletedSet = new Set(deletedBarcodes);
 
   const deletedPaymentKeys = Array.from(
@@ -2661,18 +2671,47 @@ export function applyIncomingRemoteState(remoteData: Partial<SystemData>): void 
 // High-Speed Data Mutation Methods (Immediate Real-Time Push)
 // -------------------------------------------------------------
 
+export function purgeTombstoneBarcode(barcode: string): void {
+  const clean = String(barcode).trim();
+  if (!clean) return;
+  try {
+    const current = loadLocalData();
+    if (current.deletedBarcodes && current.deletedBarcodes.includes(clean)) {
+      current.deletedBarcodes = current.deletedBarcodes.filter((b) => b !== clean);
+      saveToLocalStorage(current, false);
+    }
+  } catch {}
+  // Notify server to remove from cachedServerState.deletedBarcodes
+  if (typeof window !== "undefined") {
+    fetch("/api/sync/restore-tombstone", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ barcode: clean }),
+    }).catch(() => {});
+  }
+}
+
 export function saveStudentsData(students: Student[], deletedBarcode?: string): void {
   const current = loadLocalData();
-  const deletedBarcodes = [...(current.deletedBarcodes || [])];
-  if (deletedBarcode && !deletedBarcodes.includes(deletedBarcode)) {
-    deletedBarcodes.push(deletedBarcode);
+  let deletedBarcodes = [...(current.deletedBarcodes || [])];
+  if (deletedBarcode) {
+    const cleanDel = String(deletedBarcode).trim();
+    if (cleanDel && !deletedBarcodes.includes(cleanDel)) {
+      deletedBarcodes.push(cleanDel);
+    }
   }
+  // CRITICAL FIX: Any active student in students list MUST be removed from deletedBarcodes
+  // This prevents newly added students from being resurrect-blocked or tombstone-deleted!
+  const activeBarcodes = new Set(students.map((s) => String(s.barcode).trim()));
+  deletedBarcodes = deletedBarcodes.filter((b) => !activeBarcodes.has(b));
+
   const updated: SystemData = {
     ...current,
     students,
     deletedBarcodes,
     updatedAt: Date.now(),
   };
+  saveToLocalStorage(updated, false);
   syncDataToCloud(updated, true);
 }
 

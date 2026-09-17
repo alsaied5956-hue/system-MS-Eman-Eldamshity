@@ -18,7 +18,8 @@
  * live data in real time directly from either or both clouds.
  */
 
-import { doc, setDoc, deleteDoc, writeBatch } from "firebase/firestore";
+import { doc, setDoc, deleteDoc, getDoc, writeBatch } from "firebase/firestore";
+import { purgeTombstoneBarcode } from "./storage";
 import {
   db,
   ensureFirebaseAuth,
@@ -789,6 +790,11 @@ export function dualSyncExamGrade(params: ExamGradeSyncParams) {
 export function dualSyncStudentSave(student: Student, action: "add" | "update" = "update") {
   const b = String(student.barcode).trim();
 
+  // If adding, purge tombstone so student is never blocked
+  if (action === "add") {
+    purgeTombstoneBarcode(b);
+  }
+
   // 1️⃣ Supabase Realtime broadcast
   runInBackground(
     broadcastStudentChange({
@@ -861,8 +867,29 @@ export function dualSyncStudentDelete(barcode: string, studentId?: string | numb
 
   // 3️⃣ Firebase Firestore
   runFirestoreWrite("Firebase delete student doc", async () => {
-    const ref = doc(db, "students", b);
-    await deleteDoc(ref);
+    try {
+      const ref = doc(db, "students", b);
+      await deleteDoc(ref);
+    } catch {}
+
+    // Immediately sanitize main_center_data so snapshots never resurrect deleted student
+    try {
+      const sysRef = doc(db, "system_state", "main_center_data");
+      const snap = await getDoc(sysRef);
+      if (snap.exists()) {
+        const val = snap.data();
+        if (val) {
+          const currentStudents = Array.isArray(val.students) ? val.students : [];
+          const filtered = currentStudents.filter((s: any) => String(s?.barcode).trim() !== b);
+          const delBarcodes = Array.from(new Set([...(val.deletedBarcodes || []), b]));
+          await setDoc(
+            sysRef,
+            { students: filtered, deletedBarcodes: delBarcodes, updatedAt: Date.now() },
+            { merge: true }
+          );
+        }
+      }
+    } catch {}
   });
 }
 
