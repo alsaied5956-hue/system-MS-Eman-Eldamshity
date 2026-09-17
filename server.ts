@@ -485,6 +485,68 @@ async function startServer() {
     });
   });
 
+  // Supabase REST & Auth Proxy Endpoint (Protects sandboxed iframes from cross-origin/CORS network drops)
+  app.all(["/api/supabase-proxy", "/api/supabase-proxy/*"], async (req: Request, res: Response) => {
+    try {
+      const targetPath = req.url.replace(/^\/api\/supabase-proxy/, "") || "/";
+      const supabaseUrl =
+        process.env.VITE_SUPABASE_URL ||
+        process.env.NEXT_PUBLIC_SUPABASE_URL ||
+        "https://lzdvmzumwuqycwdecaan.supabase.co";
+      const fullTargetUrl = new URL(targetPath, supabaseUrl).toString();
+
+      const headers: Record<string, string> = {};
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (!value) continue;
+        const lower = key.toLowerCase();
+        // Skip hop-by-hop headers
+        if (lower === "host" || lower === "connection" || lower === "content-length") continue;
+        headers[key] = Array.isArray(value) ? value.join(", ") : String(value);
+      }
+
+      const anonKey =
+        process.env.VITE_SUPABASE_ANON_KEY ||
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+        "sb_publishable_B2ATdO71x3VxvOL18ATZtA_bupiDf3l";
+
+      if (!headers["apikey"]) headers["apikey"] = anonKey;
+      if (!headers["authorization"]) headers["authorization"] = `Bearer ${anonKey}`;
+
+      const fetchOptions: RequestInit = {
+        method: req.method,
+        headers,
+      };
+
+      if (req.method !== "GET" && req.method !== "HEAD" && req.body !== undefined) {
+        fetchOptions.body = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+      }
+
+      const sbResponse = await fetch(fullTargetUrl, fetchOptions);
+
+      res.status(sbResponse.status);
+
+      sbResponse.headers.forEach((val, key) => {
+        const lower = key.toLowerCase();
+        if (
+          lower !== "content-encoding" &&
+          lower !== "transfer-encoding" &&
+          lower !== "content-length"
+        ) {
+          res.setHeader(key, val);
+        }
+      });
+
+      const responseText = await sbResponse.text();
+      res.send(responseText);
+    } catch (err: any) {
+      console.warn("[Supabase Proxy] Warning forwarding to Supabase:", err?.message || err);
+      res.status(502).json({
+        message: "Failed to fetch from Supabase via proxy",
+        details: err?.message || String(err),
+      });
+    }
+  });
+
   // -------------------------------------------------------------
   // SYSTEM 1: Unified Center Synchronization Hub (الموقع الموحد)
   // -------------------------------------------------------------

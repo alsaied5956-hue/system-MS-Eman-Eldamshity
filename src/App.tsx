@@ -1014,6 +1014,19 @@ export default function App() {
       .map((s) => String(s.barcode).trim())
       .filter((b) => updatedToday[b] === "حضور");
 
+    // Include cross-day / compensation students in the official attendance batch
+    const crossDayStudents = (crossDayList || []).map((item) => item.student);
+    const allSessionStudents = [...groupStudents, ...crossDayStudents];
+    const crossDayPresentBarcodes = (crossDayList || [])
+      .map((item) => String(item.student.barcode).trim())
+      .filter((b) => updatedToday[b] === "حضور");
+    const crossDayLateBarcodes = (crossDayList || [])
+      .map((item) => String(item.student.barcode).trim())
+      .filter((b) => updatedToday[b] === "تأخير");
+
+    const fullPresentBarcodesList = Array.from(new Set([...presentBarcodesList, ...crossDayPresentBarcodes]));
+    const fullLateBarcodesList = Array.from(new Set([...lateBarcodesList, ...crossDayLateBarcodes]));
+
     // ⚡ OPTIMISTIC UI UPDATE:
     // Snapshot current state for rollback if network operation fails
     const prevScanOrder = scanLogOrderRef.current;
@@ -1068,10 +1081,10 @@ export default function App() {
         days,
         todayKey,
         absentBarcodesList.filter(b => updatedToday[b] === "غائب"),
-        lateBarcodesList,
-        presentBarcodesList,
+        fullLateBarcodesList,
+        fullPresentBarcodesList,
         currentUser?.username || "الماسح",
-        groupStudents
+        allSessionStudents
       );
 
       // Dual-sync in background without blocking
@@ -1080,11 +1093,11 @@ export default function App() {
           grade,
           days,
           absentBarcodes: Array.from(absentBarcodes).filter(b => updatedToday[b] === "غائب"),
-          lateBarcodes: Array.from(lateBarcodes),
-          presentBarcodes: presentBarcodesList,
+          lateBarcodes: fullLateBarcodesList,
+          presentBarcodes: fullPresentBarcodesList,
           dateKey: todayKey,
           finishedBy: currentUser?.username || "الماسح",
-          allStudents: groupStudents,
+          allStudents: allSessionStudents,
         });
       }, 0);
 

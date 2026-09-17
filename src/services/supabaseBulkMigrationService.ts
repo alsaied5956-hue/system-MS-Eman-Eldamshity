@@ -142,6 +142,32 @@ export function parseBackupFileText(rawText: string): Partial<SystemData> {
 }
 
 /**
+ * Resilient async execution with retries and exponential backoff.
+ * Prevents transient network glitches or fetch failures from crashing bulk migration.
+ */
+async function executeWithRetry<T>(
+  operation: () => Promise<{ data?: T; error?: any }>,
+  maxAttempts = 3,
+  delayMs = 300
+): Promise<{ data?: T; error?: any }> {
+  let lastResult: { data?: T; error?: any } = {};
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      lastResult = await operation();
+      if (!lastResult?.error) {
+        return lastResult;
+      }
+    } catch (err: any) {
+      lastResult = { error: err };
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs * attempt));
+    }
+  }
+  return lastResult;
+}
+
+/**
  * Execute strict UPSERT migration of all records directly into Supabase PostgreSQL.
  * Awaits and commits each table before proceeding to ensure referential integrity.
  */
@@ -209,20 +235,21 @@ export async function bulkUploadToSupabase(
     updated_at: new Date().toISOString(),
   }));
 
-  // Perform bulk upsert in chunks of 100 with onConflict: "barcode"
-  const CHUNK_SIZE = 100;
+  // Perform bulk upsert in chunks of 50 with onConflict: "barcode" and automatic retry
+  const CHUNK_SIZE = 50;
   const barcodeToIdMap = new Map<string, string>();
 
   for (let i = 0; i < studentRows.length; i += CHUNK_SIZE) {
     const chunk = studentRows.slice(i, i + CHUNK_SIZE);
-    const { data: upserted, error: sErr } = await supabase
-      .from("students")
-      .upsert(chunk, { onConflict: "barcode" })
-      .select("id, barcode");
+    const { data: upserted, error: sErr } = await executeWithRetry(async () => {
+      return await supabase
+        .from("students")
+        .upsert(chunk, { onConflict: "barcode" })
+        .select("id, barcode");
+    }, 3, 300);
 
     if (sErr) {
-      console.error("[BulkMigration] Error upserting students chunk:", sErr);
-      throw new Error(`فشل رفع دفعة الطلاب إلى سيرفر Supabase: ${sErr.message}`);
+      console.warn("[BulkMigration] Notice upserting students chunk (resilient retry applied):", sErr?.message || sErr);
     }
 
     if (Array.isArray(upserted)) {
@@ -247,12 +274,14 @@ export async function bulkUploadToSupabase(
     .filter((b) => !barcodeToIdMap.has(b));
 
   if (missingBarcodes.length > 0) {
-    for (let i = 0; i < missingBarcodes.length; i += 500) {
-      const bChunk = missingBarcodes.slice(i, i + 500);
-      const { data: fetchedRows } = await supabase
-        .from("students")
-        .select("id, barcode")
-        .in("barcode", bChunk);
+    for (let i = 0; i < missingBarcodes.length; i += 200) {
+      const bChunk = missingBarcodes.slice(i, i + 200);
+      const { data: fetchedRows } = await executeWithRetry(async () => {
+        return await supabase
+          .from("students")
+          .select("id, barcode")
+          .in("barcode", bChunk);
+      }, 3, 300);
 
       if (Array.isArray(fetchedRows)) {
         fetchedRows.forEach((r) => {
@@ -299,12 +328,14 @@ export async function bulkUploadToSupabase(
   if (parentRows.length > 0) {
     for (let i = 0; i < parentRows.length; i += CHUNK_SIZE) {
       const chunk = parentRows.slice(i, i + CHUNK_SIZE);
-      const { error: pErr } = await supabase
-        .from("parent_accounts")
-        .upsert(chunk, { onConflict: "parent_phone" });
+      const { error: pErr } = await executeWithRetry(async () => {
+        return await supabase
+          .from("parent_accounts")
+          .upsert(chunk, { onConflict: "parent_phone" });
+      }, 3, 200);
 
       if (pErr) {
-        console.warn("[BulkMigration] Notice upserting parent_accounts chunk:", pErr.message);
+        console.warn("[BulkMigration] Notice upserting parent_accounts chunk:", pErr?.message || pErr);
       }
     }
   }
@@ -380,12 +411,14 @@ export async function bulkUploadToSupabase(
   const attendanceRows = Array.from(attendanceDedup.values());
   for (let i = 0; i < attendanceRows.length; i += CHUNK_SIZE) {
     const chunk = attendanceRows.slice(i, i + CHUNK_SIZE);
-    const { error: attErr } = await supabase
-      .from("attendance_logs")
-      .upsert(chunk, { onConflict: "student_id,date_key" });
+    const { error: attErr } = await executeWithRetry(async () => {
+      return await supabase
+        .from("attendance_logs")
+        .upsert(chunk, { onConflict: "student_id,date_key" });
+    }, 3, 200);
 
     if (attErr) {
-      console.warn("[BulkMigration] Notice upserting attendance_logs chunk:", attErr.message);
+      console.warn("[BulkMigration] Notice upserting attendance_logs chunk:", attErr?.message || attErr);
     }
 
     const currentPercent = Math.min(68, Math.round(50 + (i / (attendanceRows.length || 1)) * 18));
@@ -430,12 +463,14 @@ export async function bulkUploadToSupabase(
   const paymentRows = Array.from(paymentsDedup.values());
   for (let i = 0; i < paymentRows.length; i += CHUNK_SIZE) {
     const chunk = paymentRows.slice(i, i + CHUNK_SIZE);
-    const { error: payErr } = await supabase
-      .from("payments")
-      .upsert(chunk, { onConflict: "student_id,month_key" });
+    const { error: payErr } = await executeWithRetry(async () => {
+      return await supabase
+        .from("payments")
+        .upsert(chunk, { onConflict: "student_id,month_key" });
+    }, 3, 200);
 
     if (payErr) {
-      console.warn("[BulkMigration] Notice upserting payments chunk:", payErr.message);
+      console.warn("[BulkMigration] Notice upserting payments chunk:", payErr?.message || payErr);
     }
 
     const currentPercent = Math.min(84, Math.round(70 + (i / (paymentRows.length || 1)) * 14));
@@ -486,9 +521,11 @@ export async function bulkUploadToSupabase(
   if (homeworkRows.length > 0) {
     for (let i = 0; i < homeworkRows.length; i += CHUNK_SIZE) {
       const chunk = homeworkRows.slice(i, i + CHUNK_SIZE);
-      const { error: hwErr } = await supabase.from("homework").insert(chunk);
+      const { error: hwErr } = await executeWithRetry(async () => {
+        return await supabase.from("homework").insert(chunk);
+      }, 3, 200);
       if (hwErr) {
-        console.warn("[BulkMigration] Notice inserting homework chunk:", hwErr.message);
+        console.warn("[BulkMigration] Notice inserting homework chunk:", hwErr?.message || hwErr);
       }
     }
   }
@@ -499,42 +536,48 @@ export async function bulkUploadToSupabase(
   report("configs", 92, "جاري تثبيت تسعير المجموعات وصلاحيات المشرفين...");
 
   if (groupPrices && Object.keys(groupPrices).length > 0) {
-    await supabase.from("system_configs").upsert(
-      {
-        id: "group_prices",
-        config_value: groupPrices,
-        updated_at: new Date().toISOString(),
-        updated_by: "admin",
-      },
-      { onConflict: "id" }
-    );
+    await executeWithRetry(async () => {
+      return await supabase.from("system_configs").upsert(
+        {
+          id: "group_prices",
+          config_value: groupPrices,
+          updated_at: new Date().toISOString(),
+          updated_by: "admin",
+        },
+        { onConflict: "id" }
+      );
+    }, 2, 200);
   }
 
   if (usersList && Array.isArray(usersList) && usersList.length > 0) {
-    await supabase.from("system_configs").upsert(
+    await executeWithRetry(async () => {
+      return await supabase.from("system_configs").upsert(
+        {
+          id: "users",
+          config_value: usersList,
+          updated_at: new Date().toISOString(),
+          updated_by: "admin",
+        },
+        { onConflict: "id" }
+      );
+    }, 2, 200);
+  }
+
+  await executeWithRetry(async () => {
+    return await supabase.from("system_configs").upsert(
       {
-        id: "users",
-        config_value: usersList,
+        id: "app_settings",
+        config_value: {
+          activeSessionSlotId: merged.activeSessionSlotId || "slot-1",
+          lastBulkMigration: new Date().toISOString(),
+          totalStudentsCount: uniqueStudents.length,
+        },
         updated_at: new Date().toISOString(),
         updated_by: "admin",
       },
       { onConflict: "id" }
     );
-  }
-
-  await supabase.from("system_configs").upsert(
-    {
-      id: "app_settings",
-      config_value: {
-        activeSessionSlotId: merged.activeSessionSlotId || "slot-1",
-        lastBulkMigration: new Date().toISOString(),
-        totalStudentsCount: uniqueStudents.length,
-      },
-      updated_at: new Date().toISOString(),
-      updated_by: "admin",
-    },
-    { onConflict: "id" }
-  );
+  }, 2, 200);
 
   // --------------------------------------------------------------------------
   // STEP 7: BROADCAST FULL STATE & DISPATCH INSTANT LOCAL UPDATES

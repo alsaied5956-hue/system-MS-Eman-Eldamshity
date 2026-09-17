@@ -52,10 +52,65 @@ if (!supabaseAnonKey) {
   supabaseAnonKey = DEFAULT_SUPABASE_ANON_KEY;
 }
 
+/**
+ * Resilient Fetch wrapper for Supabase client:
+ * In restricted sandboxed environments (such as preview iframes), direct browser fetches
+ * to 3rd-party domains can be blocked or fail with `TypeError: Failed to fetch`.
+ * This wrapper transparently retries via the local same-origin Express proxy `/api/supabase-proxy`.
+ */
+const resilientSupabaseFetch: typeof fetch = async (input, init) => {
+  try {
+    return await fetch(input, init);
+  } catch (err: any) {
+    const errMsg = String(err?.message || err || "");
+    const isFetchFailure =
+      err instanceof TypeError ||
+      errMsg.includes("Failed to fetch") ||
+      errMsg.includes("NetworkError") ||
+      errMsg.includes("Load failed") ||
+      errMsg.includes("Network request failed");
+
+    if (isFetchFailure && typeof window !== "undefined") {
+      try {
+        let rawUrl = "";
+        let method = init?.method || "GET";
+        let headers = init?.headers;
+        let body = init?.body;
+
+        if (typeof input === "string") {
+          rawUrl = input;
+        } else if (input instanceof URL) {
+          rawUrl = input.toString();
+        } else if (typeof Request !== "undefined" && input instanceof Request) {
+          rawUrl = input.url;
+          method = init?.method || input.method;
+          headers = init?.headers || input.headers;
+        }
+
+        if (rawUrl) {
+          const parsed = new URL(rawUrl);
+          const proxyUrl = `/api/supabase-proxy${parsed.pathname}${parsed.search}`;
+          return await fetch(proxyUrl, {
+            method,
+            headers,
+            body,
+          });
+        }
+      } catch (proxyErr) {
+        console.warn("[SupabaseClient] Proxy fallback notice:", proxyErr);
+      }
+    }
+    throw err;
+  }
+};
+
 export const supabase: SupabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
+  },
+  global: {
+    fetch: resilientSupabaseFetch,
   },
   realtime: {
     params: {
