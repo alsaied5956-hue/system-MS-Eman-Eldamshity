@@ -400,3 +400,85 @@ export function getLatestActiveMonthKey(
   return getCurrentMonthKey();
 }
 
+/**
+ * Determine the default GroupDays automatically based on the day of the week.
+ * Saturday (6), Monday (1), Wednesday (3) -> "سبت - إثنين - أربعاء"
+ * Sunday (0), Tuesday (2), Thursday (4) -> "أحد - ثلاثاء - خميس"
+ */
+export function getDefaultGroupDaysForDate(d = new Date()): "سبت - إثنين - أربعاء" | "أحد - ثلاثاء - خميس" {
+  try {
+    const day = d.getDay();
+    if (day === 0 || day === 2 || day === 4) {
+      return "أحد - ثلاثاء - خميس";
+    }
+    return "سبت - إثنين - أربعاء";
+  } catch {
+    return "سبت - إثنين - أربعاء";
+  }
+}
+
+/**
+ * Calculates the paired alternate session date for reciprocal compensation.
+ * Saturday (6) <-> Sunday (0)
+ * Monday (1) <-> Tuesday (2)
+ * Wednesday (3) <-> Thursday (4)
+ */
+export function getPairedAlternateDateKey(dateKeyStr: string): string | null {
+  try {
+    const parts = dateKeyStr.split("-");
+    if (parts.length !== 3) return null;
+    const year = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1;
+    const day = parseInt(parts[2], 10);
+    const d = new Date(year, month, day);
+    if (isNaN(d.getTime())) return null;
+
+    const dayOfWeek = d.getDay(); // 0: Sun, 1: Mon, 2: Tue, 3: Wed, 4: Thu, 5: Fri, 6: Sat
+
+    // Helper to format date to YYYY-MM-DD
+    const toKey = (targetDate: Date): string => {
+      const y = targetDate.getFullYear();
+      const m = String(targetDate.getMonth() + 1).padStart(2, "0");
+      const dayNum = String(targetDate.getDate()).padStart(2, "0");
+      return `${y}-${m}-${dayNum}`;
+    };
+
+    // 1. Saturday (6) <-> Sunday (0)
+    if (dayOfWeek === 6) {
+      const nextDay = new Date(d);
+      nextDay.setDate(d.getDate() + 1);
+      return toKey(nextDay);
+    } else if (dayOfWeek === 0) {
+      const prevDay = new Date(d);
+      prevDay.setDate(d.getDate() - 1);
+      return toKey(prevDay);
+    }
+
+    // 2. Monday (1) <-> Tuesday (2)
+    if (dayOfWeek === 1) {
+      const nextDay = new Date(d);
+      nextDay.setDate(d.getDate() + 1);
+      return toKey(nextDay);
+    } else if (dayOfWeek === 2) {
+      const prevDay = new Date(d);
+      prevDay.setDate(d.getDate() - 1);
+      return toKey(prevDay);
+    }
+
+    // 3. Wednesday (3) <-> Thursday (4)
+    if (dayOfWeek === 3) {
+      const nextDay = new Date(d);
+      nextDay.setDate(d.getDate() + 1);
+      return toKey(nextDay);
+    } else if (dayOfWeek === 4) {
+      const prevDay = new Date(d);
+      prevDay.setDate(d.getDate() - 1);
+      return toKey(prevDay);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+

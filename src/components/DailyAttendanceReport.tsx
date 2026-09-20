@@ -1,6 +1,6 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { Student, GradeName, GroupDays, GRADE_ORDER } from "../types";
-import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName } from "../utils/helpers";
+import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName, getDefaultGroupDaysForDate } from "../utils/helpers";
 import { matchStudentSearch } from "../utils/search";
 import { exportAttendanceHistoryToExcel } from "../utils/excel";
 import { Calendar, Filter, FileSpreadsheet, FileText, CheckCircle2, AlertTriangle, XCircle, Edit3, Search, X } from "lucide-react";
@@ -20,8 +20,30 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
 }) => {
   const [selectedDate, setSelectedDate] = useState<string>(getTodayKey());
   const [filterGrade, setFilterGrade] = useState<string>("ALL");
-  const [filterDays, setFilterDays] = useState<string>("ALL");
+  const [filterDays, setFilterDays] = useState<string>(() => {
+    try {
+      return getDefaultGroupDaysForDate(new Date());
+    } catch {
+      return "ALL";
+    }
+  });
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Automatically sync day-group filter when user changes date, if not manually set to ALL
+  const handleDateChange = (newDate: string) => {
+    setSelectedDate(newDate);
+    try {
+      const parts = newDate.split("-");
+      if (parts.length === 3) {
+        const d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+        if (!isNaN(d.getTime())) {
+          setFilterDays(getDefaultGroupDaysForDate(d));
+        }
+      }
+    } catch (err) {
+      console.warn("Date parse error:", err);
+    }
+  };
 
   const [editingStudent, setEditingStudent] = useState<{ barcode: string; name: string; currentStatus: string } | null>(null);
   const [newStatusSelect, setNewStatusSelect] = useState("حضور");
@@ -31,7 +53,15 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   const filteredStudents = useMemo(() => {
     const base = students.filter((s) => {
       if (filterGrade !== "ALL" && s.groupGrade !== filterGrade) return false;
-      if (filterDays !== "ALL" && s.groupDays !== filterDays) return false;
+      if (filterDays !== "ALL") {
+        if (s.groupDays === filterDays) return true;
+        // Strict Isolation with Compensation: Include other-group students ONLY if they actually attended on this specific date
+        const st = dateAttendanceMap[s.barcode];
+        if (st === "حضور" || st === "تأخير") {
+          return true;
+        }
+        return false;
+      }
       return true;
     });
 
@@ -48,7 +78,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
     }
 
     return sortStudentsByGradeAndName(base);
-  }, [students, filterGrade, filterDays, searchQuery]);
+  }, [students, filterGrade, filterDays, searchQuery, dateAttendanceMap]);
 
   const { presentCount, lateCount, absentCount } = useMemo(() => {
     let present = 0;
@@ -103,7 +133,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
             <input
               type="date"
               value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
+              onChange={(e) => handleDateChange(e.target.value)}
               className="bg-transparent text-xs font-bold text-slate-100 outline-none cursor-pointer"
             />
           </div>
@@ -212,7 +242,16 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                       <td className="p-3.5 font-mono text-amber-300 font-bold">{student.barcode}</td>
                       <td className="p-3.5 font-bold text-slate-100">{student.name}</td>
                       <td className="p-3.5 text-slate-300">{student.groupGrade}</td>
-                      <td className="p-3.5 text-slate-400">{student.groupDays}</td>
+                      <td className="p-3.5 text-slate-400">
+                        <div className="flex items-center gap-1.5">
+                          <span>{student.groupDays}</span>
+                          {filterDays !== "ALL" && student.groupDays !== filterDays && (
+                            <span className="text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/30 px-2 py-0.5 rounded-full font-bold">
+                              🔄 تعويض
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="p-3.5">
                         <span className={`px-3 py-1 rounded-full text-xs font-bold border inline-block ${statusBg}`}>
                           {status}

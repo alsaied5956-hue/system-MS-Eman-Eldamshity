@@ -46,6 +46,7 @@ import {
   formatArabicDate,
   formatTimeArabic,
   isStudentPaid,
+  getPairedAlternateDateKey,
 } from "./utils/helpers";
 import {
   subscribeToGroupFinished,
@@ -1093,6 +1094,24 @@ export default function App() {
       ...attendanceHistory,
       [todayKey]: updatedToday,
     };
+
+    // Mutual session exclusion: A student attending on one group day (e.g. Sunday makeup)
+    // must NOT have a duplicate presence on the paired alternate day (e.g. Saturday)
+    const pairedDateKey = getPairedAlternateDateKey(todayKey);
+    if (pairedDateKey && updatedHistory[pairedDateKey] && crossDayList && crossDayList.length > 0) {
+      const pairedHistory = { ...updatedHistory[pairedDateKey] };
+      let hasPairedChanges = false;
+      crossDayList.forEach((item) => {
+        const b = String(item.student.barcode).trim();
+        if (pairedHistory[b] === "حضور" || pairedHistory[b] === "تأخير") {
+          delete pairedHistory[b];
+          hasPairedChanges = true;
+        }
+      });
+      if (hasPairedChanges) {
+        updatedHistory[pairedDateKey] = pairedHistory;
+      }
+    }
 
     const updatedStudents = (appStudentsRef.current || students).map((s) => {
       const b = String(s.barcode).trim();

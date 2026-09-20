@@ -11,6 +11,8 @@ import {
   openWhatsApp,
   evaluateAttendanceStatus,
   isStudentPaid,
+  getDefaultGroupDaysForDate,
+  getPairedAlternateDateKey,
 } from "../utils/helpers";
 import { playBeep, speakArabicGreeting } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
@@ -343,12 +345,32 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   });
 
   const [selectedDays, setSelectedDays] = useState<GroupDays>(() => {
+    const todayDefault = getDefaultGroupDaysForDate(new Date());
     if (typeof window !== "undefined") {
       const saved = localStorage.getItem("aiman_scanner_days") as GroupDays;
-      if (saved === "سبت - إثنين - أربعاء" || saved === "أحد - ثلاثاء - خميس") return saved;
+      if (saved === "سبت - إثنين - أربعاء" || saved === "أحد - ثلاثاء - خميس") {
+        // Intelligently align with current day of week if standard schedule
+        const dayOfWeek = new Date().getDay();
+        if (dayOfWeek === 6 || dayOfWeek === 1 || dayOfWeek === 3) return "سبت - إثنين - أربعاء";
+        if (dayOfWeek === 0 || dayOfWeek === 2 || dayOfWeek === 4) return "أحد - ثلاثاء - خميس";
+        return saved;
+      }
     }
-    return "سبت - إثنين - أربعاء";
+    return todayDefault;
   });
+
+  // Track the specific session (grade + days) in which each barcode was scanned to prevent leakage across sessions
+  const [scannedSessionMap, setScannedSessionMap] = useState<Record<string, { grade: GradeName; days: GroupDays }>>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const raw = sessionStorage.getItem("aiman_scanner_session_map");
+        if (raw) return JSON.parse(raw);
+      } catch {}
+    }
+    return {};
+  });
+  const scannedSessionMapRef = useRef(scannedSessionMap);
+  scannedSessionMapRef.current = scannedSessionMap;
 
   // ⚡ Dedicated scanner queue state with instant optimistic UI cleanup
   const [scannerQueue, setScannerQueue] = useState<string[]>(() => scanLogOrder || []);
@@ -658,6 +680,21 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       return prev.some((b) => String(b).trim() === clean) ? prev : [clean, ...prev];
     });
 
+    // Record session association (grade + days) for accurate compensation isolation
+    setScannedSessionMap((prev) => {
+      const clean = String(student.barcode).trim();
+      const updated = {
+        ...prev,
+        [clean]: { grade: targetGrade, days: targetDays },
+      };
+      if (typeof window !== "undefined") {
+        try {
+          sessionStorage.setItem("aiman_scanner_session_map", JSON.stringify(updated));
+        } catch {}
+      }
+      return updated;
+    });
+
     // 3. Record student at entry time & evaluate whether on-time (حضور) or late (تأخير)
     const now = new Date();
     const nowTimeStr = now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
@@ -924,6 +961,12 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       const st = (students || []).find((s) => String(s.barcode).trim() === bCode);
       if (!st) return;
       if (st.groupGrade === selectedGrade && st.groupDays !== selectedDays) {
+        // STRICT CHECK: Ensure this student was actually scanned for THIS active session
+        const sessionInfo = scannedSessionMapRef.current[bCode];
+        if (sessionInfo && (sessionInfo.grade !== selectedGrade || sessionInfo.days !== selectedDays)) {
+          return; // Student was scanned for another session, do NOT include as compensation here!
+        }
+
         const timeIso = scanLogTimes?.[bCode];
         const timeStr = timeIso
           ? new Date(timeIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" })
@@ -1154,13 +1197,24 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
 
   const totalAllScannedToday = (scannerQueue || []).length;
 
-  // Active Scanned list in the scanner table - strictly for the selected grade only
+  // Active Scanned list in the scanner table - strictly for the selected grade and matching session group
   const displayedBarcodes = useMemo(() => {
     return (scannerQueue || []).filter((barcode) => {
-      const s = studentMap.get(String(barcode).trim());
-      return s && s.groupGrade === selectedGrade;
+      const cleanB = String(barcode).trim();
+      const s = studentMap.get(cleanB);
+      if (!s || s.groupGrade !== selectedGrade) return false;
+
+      // Direct match with active group days
+      if (s.groupDays === selectedDays) return true;
+
+      // Other days (compensation): strictly only if scanned for THIS specific session
+      const sessionInfo = scannedSessionMap[cleanB];
+      if (sessionInfo && sessionInfo.grade === selectedGrade && sessionInfo.days === selectedDays) {
+        return true;
+      }
+      return false;
     });
-  }, [scannerQueue, studentMap, selectedGrade]);
+  }, [scannerQueue, studentMap, selectedGrade, selectedDays, scannedSessionMap]);
 
   const filteredBarcodes = useMemo(() => {
     if (!tableSearch.trim()) return displayedBarcodes;

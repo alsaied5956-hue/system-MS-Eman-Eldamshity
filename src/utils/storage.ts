@@ -69,6 +69,7 @@ export interface SystemData {
   students: Student[];
   attendanceHistory: Record<string, Record<string, string>>; // { "2026-08-25": { "1001": "حضور" } }
   attendanceToday: Record<string, string>;
+  attendanceTodayDate?: string; // Strict date verification tag (YYYY-MM-DD)
   scanLogTimes: Record<string, string>; // ISO date string
   payments: Record<string, Record<string, PaymentRecord>>; // { "2026-08": { "1001": { amount: 100, ... } } }
   scanLogOrder: string[];
@@ -486,7 +487,8 @@ export function loadLocalData(): SystemData {
       if (typeof timeIso === "string" && timeIso.includes("T")) {
         return timeIso.startsWith(todayKey);
       }
-      return true;
+      // Strict rule: scans without verified today timestamp must never bleed into a new day
+      return false;
     });
 
     const filteredScanTimes: Record<string, string> = {};
@@ -526,7 +528,11 @@ export function loadLocalData(): SystemData {
       }
     }
 
-    const rawToday: Record<string, string> = parsed.attendanceHistory?.[todayKey] || parsed.attendanceToday || {};
+    // Strict Date Isolation: attendanceToday MUST belong to todayKey.
+    // Never fallback to obsolete yesterday's attendanceToday if today is a new day!
+    const isTodayRecordValid = parsed.attendanceTodayDate === todayKey || Boolean(parsed.attendanceHistory?.[todayKey]);
+    const rawToday: Record<string, string> =
+      parsed.attendanceHistory?.[todayKey] || (isTodayRecordValid ? parsed.attendanceToday : {}) || {};
     const filteredToday: Record<string, string> = {};
     for (const [bCode, status] of Object.entries(rawToday)) {
       const cleanB = String(bCode).trim();
@@ -797,6 +803,7 @@ export function saveToLocalStorage(data: SystemData, updateTimestamp: boolean = 
   const todayKey = getTodayKey();
   const clonedData: SystemData = {
     ...data,
+    attendanceTodayDate: todayKey,
     attendanceHistory: {
       ...(data.attendanceHistory || {}),
       [todayKey]: data.attendanceToday || {},
@@ -2775,6 +2782,7 @@ export function saveAttendanceTodayData(
   const updated: SystemData = {
     ...current,
     attendanceToday,
+    attendanceTodayDate: todayKey,
     attendanceHistory: {
       ...current.attendanceHistory,
       [todayKey]: attendanceToday,
@@ -2808,6 +2816,7 @@ export function saveAttendanceAndStudentsBatch(
     ...current,
     students,
     attendanceToday,
+    attendanceTodayDate: todayKey,
     attendanceHistory: {
       ...current.attendanceHistory,
       [todayKey]: attendanceToday,
