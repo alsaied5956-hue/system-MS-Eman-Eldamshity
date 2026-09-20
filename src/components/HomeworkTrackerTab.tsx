@@ -85,7 +85,7 @@ export const HomeworkTrackerTab: React.FC<HomeworkTrackerTabProps> = ({
 
   // Focus input on mount or mode change
   useEffect(() => {
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
   }, [currentMode, selectedGrade, selectedDays]);
 
   // ⚡ Supabase Realtime: Listen to homework updates from other assistants in sub-50ms

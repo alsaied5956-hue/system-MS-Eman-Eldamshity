@@ -141,7 +141,6 @@ const ScannerInputBar = React.memo<ScannerInputBarProps>(({
           onBlur={onBlur}
           onKeyDown={handleKeyDown}
           placeholder="مرر كارت الطالب أمام الإسكانر أو اكتب الكود..."
-          autoFocus
           className="w-full bg-[#060a17] border-2 border-indigo-500/40 focus:border-amber-400 text-amber-300 text-center font-mono font-black text-2xl md:text-3xl px-4 py-4 rounded-3xl outline-none focus:ring-4 focus:ring-amber-400/20 shadow-2xl placeholder:text-slate-600 placeholder:text-base transition-all"
         />
         <ScanLine className="w-7 h-7 text-amber-400/70 absolute left-4 top-4 pointer-events-none animate-pulse" />
@@ -607,27 +606,18 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     }
   }, []);
 
-  // Keep focus locked on input for ultra-fast, continuous, sub-10ms scanning
-  const handleInputBlur = useCallback((e: React.FocusEvent<HTMLInputElement>) => {
-    if (isManualModalOpen || isCameraScannerOpen || isNewSessionModalOpen || absenceConfirmData) return;
-    const related = e.relatedTarget as HTMLElement | null;
-    if (related && (related.tagName === "INPUT" || related.tagName === "TEXTAREA" || related.tagName === "SELECT")) {
-      return;
-    }
-    requestAnimationFrame(() => {
-      inputRef.current?.focus();
-    });
-  }, [isManualModalOpen, isCameraScannerOpen, isNewSessionModalOpen, absenceConfirmData]);
+  // Graceful blur handler that never steals focus, never breaks button clicks, and never scrolls the viewport
+  const handleInputBlur = useCallback(() => {
+    // Intentionally no-op: Global keyboard listener handles hardware scanners seamlessly.
+    // We never steal focus back on blur so buttons (e.g. Save & Send Absences) work instantly without jumping.
+  }, []);
 
+  // Safe initial focus on mount only, strictly preventing viewport scrolling
   useEffect(() => {
     if (!isManualModalOpen && !isCameraScannerOpen && !isNewSessionModalOpen && !absenceConfirmData) {
-      inputRef.current?.focus();
-      const timer = setTimeout(() => {
-        inputRef.current?.focus();
-      }, 50);
-      return () => clearTimeout(timer);
+      inputRef.current?.focus({ preventScroll: true });
     }
-  }, [scanAlert, isManualModalOpen, isCameraScannerOpen, isNewSessionModalOpen, absenceConfirmData]);
+  }, [isManualModalOpen, isCameraScannerOpen, isNewSessionModalOpen, absenceConfirmData]);
 
   const processAttendance = useCallback((
     student: Student,

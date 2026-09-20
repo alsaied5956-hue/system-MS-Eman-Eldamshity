@@ -115,7 +115,7 @@ export const StudentSearchBox: React.FC<StudentSearchBoxProps> = ({
               onChange("");
               setIsOpen(false);
               setSelectedIndex(-1);
-              inputRef.current?.focus();
+              inputRef.current?.focus({ preventScroll: true });
             }}
             className="absolute left-2.5 p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
             title="مسح البحث"
