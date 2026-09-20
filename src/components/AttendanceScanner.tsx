@@ -8,6 +8,7 @@ import {
 } from "../types";
 import {
   getCurrentMonthKey,
+  getTodayKey,
   openWhatsApp,
   evaluateAttendanceStatus,
   isStudentPaid,
@@ -16,7 +17,7 @@ import {
 } from "../utils/helpers";
 import { playBeep, speakArabicGreeting } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
-import { enqueuePlatformMessagesBatch, flushPendingSyncToCloud } from "../utils/storage";
+import { enqueuePlatformMessagesBatch, flushPendingSyncToCloud, getAttendanceHistory } from "../utils/storage";
 import { pushLiveAttendanceEvent } from "../utils/liveEventStream";
 import { dualSyncLiveScan } from "../utils/dualSync";
 import { recordDeviceEntryExitScan, getPersistentDeviceId, getPersistentDeviceName } from "../utils/deviceClient";
@@ -933,7 +934,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     // 3. Record student at entry time & evaluate whether on-time (حضور) or late (تأخير)
     const now = new Date();
     const nowTimeStr = now.toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" });
-    const calculatedStatus = overrideStatus || evaluateAttendanceStatus(now, activeSessionSlotIdRef.current);
+    const calculatedStatus = overrideStatus || evaluateAttendanceStatus(now, activeSessionSlotIdRef.current, student.groupTime);
 
     const monthKey = getCurrentMonthKey();
     const isPaid = isStudentPaid(paymentsRef.current?.[monthKey], student.barcode);
@@ -956,18 +957,27 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       });
     }
 
-    playBeep("success");
+    const hasAbsenceStreak = (student.totalAbsentDays || 0) >= 2;
+    if (hasAbsenceStreak) {
+      playBeep("warning");
+    } else {
+      playBeep(calculatedStatus === "تأخير" ? "warning" : "success");
+    }
     speakArabicGreeting(student.name, voiceEnabledRef.current);
 
     const isCrossDay = student.groupDays !== targetDays;
     setScanAlert({
-      type: "success",
-      title: calculatedStatus === "تأخير"
+      type: hasAbsenceStreak ? "warning" : "success",
+      title: hasAbsenceStreak
+        ? `⚠️ إنذار غياب متكرر: ${student.name} (غائب ${student.totalAbsentDays} أيام سابقة)`
+        : calculatedStatus === "تأخير"
         ? `🟡 تسجيل دخول متأخر: ${student.name}`
         : `🟢 أهلاً بك يا ${student.name} (حضور في الموعد)`,
-      message: isCrossDay
+      message: hasAbsenceStreak
+        ? `⚠️ تنبيه للمشرفة: الطالب متكرر الغياب (${student.totalAbsentDays} أيام). يرجى مراجعة كشكول الواجب واستدعاء ولي الأمر إذا تكرر الغياب.`
+        : isCrossDay
         ? `🔄 طالب تعويض أيام لنفس الصف (${student.groupGrade} - ${student.groupDays})`
-        : `المجموعة: ${student.groupGrade} | ${student.groupDays}`,
+        : `المجموعة: ${student.groupGrade} | ${student.groupDays}${student.groupTime ? ` - الساعة: ${student.groupTime}` : ""}`,
       student,
       time: nowTimeStr,
       status: calculatedStatus,
@@ -1166,7 +1176,15 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     const absentList: { student: Student; message: string; type: "غائب" }[] = [];
     const lateList: { student: Student; message: string; type: "تأخير" }[] = [];
     const crossDayList: { student: Student; message: string; type: "عكس_أيام" }[] = [];
+    const compensatedExemptList: { student: Student; alternateDate: string }[] = [];
     let presentCount = 0;
+
+    const todayKey = getTodayKey();
+    const pairedAltKey = getPairedAlternateDateKey(todayKey);
+    let history: Record<string, Record<string, string>> = {};
+    try {
+      history = getAttendanceHistory();
+    } catch {}
 
     // طابور الحضور الفعلي بالقاعة الحالية (الطلاب الذين تم مسح كروت دخولهم)
     const queueBarcodeSet = new Set((scannerQueue || []).map((b) => String(b).trim()));
@@ -1176,6 +1194,19 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       const isPresentInQueue = queueBarcodeSet.has(bCode);
 
       if (!isPresentInQueue) {
+        // حماية طالب التعويض: التحقق إن كان قد حضر بالفعل في اليوم البديل لنفس دورة الشرح الأسبوعية
+        const attendedAlternate =
+          pairedAltKey &&
+          (history?.[pairedAltKey]?.[bCode] === "حضور" || history?.[pairedAltKey]?.[bCode] === "تأخير");
+
+        if (attendedAlternate) {
+          compensatedExemptList.push({
+            student,
+            alternateDate: pairedAltKey,
+          });
+          return; // تم إعفاؤه وحمايته من الغياب الخاطئ ورسائل الواتساب غير المستحقة
+        }
+
         // الطالب مقيد بهذه المجموعة ولكنه لم يمر على الإسكانر في هذه الحصة -> غائب
         const msg =
           `تنبيه من منظومة الأستاذة إيمان الدمشيتي 📐\n` +
@@ -1248,6 +1279,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       absentList,
       lateList,
       crossDayList,
+      compensatedExemptList,
       presentCount,
       totalStudents: groupStudents.length,
     });
@@ -2540,6 +2572,30 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                 الطلاب المعروضون بالأسفل هم فقط الذين <strong className="text-rose-300">لم يمر كارتهم أمام الإسكانر</strong> ولم يدخلوا طابور الحضور. لن يتم إرسال أي بيانات أو إغلاق الحصة حتى تضغط على "تأكيد وإرسال".
               </div>
             </div>
+
+            {/* Compensated Exempt Students Banner */}
+            {absenceConfirmData.compensatedExemptList && absenceConfirmData.compensatedExemptList.length > 0 && (
+              <div className="bg-emerald-950/40 border border-emerald-500/40 p-3 rounded-2xl text-xs space-y-1.5 shrink-0">
+                <div className="flex items-center justify-between text-emerald-300 font-bold">
+                  <span className="flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    <span>طلاب معفيون من الغياب اليوم (حضروا في اليوم البديل كتعويض):</span>
+                  </span>
+                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-mono font-bold">
+                    {absenceConfirmData.compensatedExemptList.length} طالب
+                  </span>
+                </div>
+                <div className="text-[11px] text-emerald-400/90 flex flex-wrap gap-1.5 pt-0.5">
+                  {absenceConfirmData.compensatedExemptList.map(({ student, alternateDate }) => (
+                    <span key={student.barcode} className="bg-slate-900/80 border border-emerald-500/30 px-2.5 py-1 rounded-xl flex items-center gap-1">
+                      <span>🛡️</span>
+                      <strong>{student.name}</strong>
+                      <span className="text-[10px] text-slate-400">({alternateDate})</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Absent Students List Header & Search */}
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shrink-0">

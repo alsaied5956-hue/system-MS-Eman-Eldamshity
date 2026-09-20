@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import { Student, GradeName, GRADE_ORDER } from "../types";
 import { TEACHER_NAME } from "../utils/helpers";
 import { printElement, downloadPrintableHtml } from "../utils/print";
+import { generateCode128DataUrl } from "../utils/barcode128";
 import { Printer, X, CreditCard, Filter, Info, Download } from "lucide-react";
 
 interface PrintCardsModalProps {
@@ -212,7 +213,9 @@ export const PrintCardsModal: React.FC<PrintCardsModalProps> = ({ students, onCl
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-slate-500 font-bold">مواعيد المجموعة:</span>
-                  <span className="text-[10px] font-semibold text-slate-700">{student.groupDays}</span>
+                  <span className="text-[10px] font-semibold text-slate-700">
+                    {student.groupDays} {student.groupTime ? `(${student.groupTime})` : ""}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-slate-500 font-bold">هاتف ولي الأمر:</span>
@@ -221,28 +224,34 @@ export const PrintCardsModal: React.FC<PrintCardsModalProps> = ({ students, onCl
               </div>
 
               {/* Barcode & QR Code Section */}
-              <div className="border-t border-amber-200/60 pt-2 mt-2 flex items-center justify-between px-1">
-                <div className="text-right">
-                  <span className="text-[10px] text-slate-500 font-bold block">كود الباركود الذكي:</span>
-                  <div className="font-mono text-base font-black tracking-wider text-slate-950 mt-0.5">
-                    #{student.barcode}
+              <div className="border-t border-amber-200/60 pt-2 mt-2 flex items-center justify-between gap-2 px-1">
+                {/* 1D Laser Barcode (Code-128) */}
+                <div className="text-right flex-1 min-w-0">
+                  <span className="text-[9px] text-slate-500 font-bold block">باركود الليزر (1D Barcode):</span>
+                  <div className="my-0.5 max-w-[170px]">
+                    <img
+                      src={generateCode128DataUrl(student.barcode, 36, 2)}
+                      alt={`Barcode ${student.barcode}`}
+                      className="h-10 w-full object-contain bg-white rounded border border-slate-200 p-0.5"
+                    />
                   </div>
-                  <span className="text-[9px] text-emerald-800 font-extrabold bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-full inline-block mt-1">
-                    جاهز للمسح الضوئي والكاميرا
+                  <span className="text-[8px] text-emerald-800 font-extrabold bg-emerald-100 border border-emerald-300 px-1.5 py-0.2 rounded-full inline-block">
+                    قارئ ليزر + كاميرا سريعة
                   </span>
                 </div>
 
+                {/* 2D QR Code */}
                 {qrCodeMap[String(student.barcode).trim()] ? (
-                  <div className="flex flex-col items-center">
+                  <div className="flex flex-col items-center shrink-0">
                     <img
                       src={qrCodeMap[String(student.barcode).trim()]}
                       alt={`QR Code ${student.barcode}`}
-                      className="w-16 h-16 border border-slate-300 rounded-lg p-0.5 bg-white shadow-sm"
+                      className="w-14 h-14 border border-slate-300 rounded-lg p-0.5 bg-white shadow-sm"
                     />
                     <span className="text-[8px] text-slate-500 font-mono mt-0.5">QR سريع</span>
                   </div>
                 ) : (
-                  <div className="w-16 h-16 bg-slate-100 border border-slate-200 rounded-lg flex items-center justify-center text-[9px] text-slate-400 font-mono">
+                  <div className="w-14 h-14 bg-slate-100 border border-slate-200 rounded-lg flex items-center justify-center text-[8px] text-slate-400 font-mono shrink-0">
                     جاري التوليد...
                   </div>
                 )}

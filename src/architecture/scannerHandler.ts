@@ -146,7 +146,7 @@ export async function processStudentScan(input: ProcessScanInput): Promise<ScanP
 
   // 5. Calculate attendance status (حضور vs تأخير)
   const calculatedStatus: "حضور" | "تأخير" =
-    input.overrideStatus || (evaluateAttendanceStatus(now, input.activeSessionSlotId) as "حضور" | "تأخير");
+    input.overrideStatus || (evaluateAttendanceStatus(now, input.activeSessionSlotId, student.groupTime) as "حضور" | "تأخير");
 
   // 6. Generate Monotonic HLC timestamp
   let hlc;

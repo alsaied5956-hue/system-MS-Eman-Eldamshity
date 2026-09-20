@@ -192,33 +192,86 @@ export const PREDEFINED_SESSION_SLOTS: SessionSlot[] = [
 ];
 
 /**
- * Determine if arrival time is "حضور" (on-time) or "تأخير" (late) based on session slot.
- * As requested by user:
- * - 1:00 PM session: Window from 12:45 to 1:15 is considered on-time. After 1:15 is Late.
- * - 2:00 PM session: Window from 1:45 to 2:15 is on-time. After 2:15 is Late.
- * - 3:00 PM session: Window from 2:45 to 3:15 is on-time. After 3:15 is Late.
+ * Converts a group time string (e.g. "01:00 م", "02:30 م", "3:00", "14:00")
+ * to total minutes from midnight for exact scheduling calculations.
  */
-export function evaluateAttendanceStatus(now: Date, slotId: string): "حضور" | "تأخير" {
-  if (slotId === "auto") {
-    // Look at the closest hour:
-    // If minutes are between 45 of previous hour up to 15 of current hour -> on time.
-    // If minutes are between 16 and 44 -> late.
-    const minutes = now.getMinutes();
-    if (minutes <= 15 || minutes >= 45) {
-      return "حضور";
-    }
-    return "تأخير";
+export function parseGroupTimeToMinutes(timeStr?: string): number | null {
+  if (!timeStr) return null;
+  const clean = String(timeStr).trim();
+  if (!clean) return null;
+
+  // Check for Arabic/English AM/PM indicators
+  const isPM = clean.includes("م") || clean.toLowerCase().includes("pm") || clean.includes("مساء");
+  const isAM = clean.includes("ص") || clean.toLowerCase().includes("am") || clean.includes("صباح");
+
+  // Extract numbers
+  const digitsOnly = clean.replace(/[^\d:]/g, "");
+  const parts = digitsOnly.split(":");
+  if (parts.length === 0 || !parts[0]) return null;
+
+  let hour = parseInt(parts[0], 10);
+  const minute = parts.length > 1 ? parseInt(parts[1], 10) || 0 : 0;
+
+  if (isNaN(hour)) return null;
+
+  if (isPM && hour < 12) {
+    hour += 12;
+  } else if (isAM && hour === 12) {
+    hour = 0;
   }
 
-  const slot = PREDEFINED_SESSION_SLOTS.find((s) => s.id === slotId);
-  if (!slot) return "حضور";
+  return hour * 60 + minute;
+}
 
+/**
+ * Determine if arrival time is "حضور" (on-time / early) or "تأخير" (late)
+ * intelligently based on student's specific groupTime or active session slot.
+ * 
+ * Rules:
+ * 1. If student has an assigned groupTime (e.g. 2:00 PM), any arrival up to 2:15 PM is "حضور".
+ *    Arriving after 2:15 PM is "تأخير".
+ * 2. If a specific slot is chosen in the scanner, any arrival before/during slot start + threshold is "حضور".
+ * 3. In "auto" mode:
+ *    - Arriving between :40 of previous hour and :15 past current hour is "حضور".
+ *    - Arriving between :16 and :39 is "تأخير".
+ */
+export function evaluateAttendanceStatus(
+  now: Date,
+  slotId: string = "auto",
+  groupTime?: string
+): "حضور" | "تأخير" {
   const currentMinutesFromMidnight = now.getHours() * 60 + now.getMinutes();
-  const sessionStartMinutesFromMidnight = slot.startHour * 60 + slot.startMinute;
-  const lateThresholdMinutesFromMidnight = sessionStartMinutesFromMidnight + slot.lateThresholdMinute;
 
-  // On time if arriving before or up to late threshold (e.g. up to 1:15 PM for a 1:00 PM slot)
-  if (currentMinutesFromMidnight <= lateThresholdMinutesFromMidnight) {
+  // 1. Highest precedence: Student's exact group time
+  if (groupTime) {
+    const studentStartMinutes = parseGroupTimeToMinutes(groupTime);
+    if (studentStartMinutes !== null) {
+      const graceThreshold = studentStartMinutes + 15; // 15-minute grace period
+      if (currentMinutesFromMidnight <= graceThreshold) {
+        return "حضور"; // On-time or early arrival
+      }
+      return "تأخير"; // Arrived past grace period
+    }
+  }
+
+  // 2. Specific session slot selected in scanner
+  if (slotId && slotId !== "auto") {
+    const slot = PREDEFINED_SESSION_SLOTS.find((s) => s.id === slotId);
+    if (slot) {
+      const sessionStartMinutesFromMidnight = slot.startHour * 60 + slot.startMinute;
+      const lateThresholdMinutesFromMidnight = sessionStartMinutesFromMidnight + slot.lateThresholdMinute;
+
+      if (currentMinutesFromMidnight <= lateThresholdMinutesFromMidnight) {
+        return "حضور";
+      }
+      return "تأخير";
+    }
+  }
+
+  // 3. Smart Auto Mode (calculates based on center class cadence):
+  const minutes = now.getMinutes();
+  // Arrival from 40 min past hour (early for next class) up to 15 min past hour (on-time for current class)
+  if (minutes <= 15 || minutes >= 40) {
     return "حضور";
   }
   return "تأخير";

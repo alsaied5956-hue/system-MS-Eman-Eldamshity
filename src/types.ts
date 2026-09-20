@@ -21,7 +21,23 @@ export const GRADE_ORDER: GradeName[] = [
   "الصف الثالث الثانوي"
 ];
 
-export type GroupDays = "سبت - إثنين - أربعاء" | "أحد - ثلاثاء - خميس";
+export type GroupDays =
+  | "سبت - إثنين - أربعاء"
+  | "أحد - ثلاثاء - خميس"
+  | "الجمعة مكثف"
+  | "سبت وأربعاء"
+  | "أحد وثلاثاء"
+  | string;
+
+export interface StudentExamRecord {
+  id: string;
+  examTitle: string;
+  date: string;
+  score: number;
+  maxScore: number;
+  percentage: number;
+  notes?: string;
+}
 
 export interface Student {
   id?: string;
@@ -31,6 +47,7 @@ export interface Student {
   parentPhone: string;
   groupGrade: GradeName;
   groupDays: GroupDays;
+  groupTime?: string; // موعد الحصة (مثلاً: "01:00 م" أو "03:00 م" أو "05:00 م")
   customMonthlyFee?: number; // السعر المخصص للطالب (مثلا 50 أو 60 أو 70 أو 80 أو إعفاء كامل)
   discountReason?: string; // سبب الخصم أو ملاحظات (أيتام، خصم إخوة، تفوق)
   points: number;
@@ -39,11 +56,13 @@ export interface Student {
   totalExamScores: number[]; // مصفوفة النسب المئوية للاختبارات
   lastExamTitle?: string;
   lastExamScore?: string;
+  examHistory?: StudentExamRecord[]; // أرشيف تفصيلي لجميع الامتحانات السابقة
+  homeworkLogs?: Record<string, "كامل" | "ناقص" | "لم يسلم">; // سجل متابعة الواجب بالتاريخ
   notes?: string;
   createdAt?: string;
 }
 
-export type AttendanceStatus = "حضور" | "تأخير" | "غائب" | "إذن";
+export type AttendanceStatus = "حضور" | "تأخير" | "غائب" | "إذن" | "معفى_تعويض" | "استئذان";
 
 export interface PaymentRecord {
   id?: string;

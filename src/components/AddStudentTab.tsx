@@ -21,12 +21,27 @@ export const AddStudentTab: React.FC<AddStudentTabProps> = ({
   const [parentPhone, setParentPhone] = useState("");
   const [groupGrade, setGroupGrade] = useState<GradeName>("الصف الرابع الابتدائي");
   const [groupDays, setGroupDays] = useState<GroupDays>("سبت - إثنين - أربعاء");
+  const [groupTime, setGroupTime] = useState("01:00 م");
   const [isCustomFee, setIsCustomFee] = useState(false);
   const [customMonthlyFee, setCustomMonthlyFee] = useState<number>(100);
   const [discountReason, setDiscountReason] = useState("");
   const [cardFeeAmount, setCardFeeAmount] = useState(30);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  const handleGenerateNextBarcode = () => {
+    const existingNumbers = (students || [])
+      .map((s) => parseInt(String(s.barcode).replace(/\D/g, ""), 10))
+      .filter((n) => !isNaN(n) && n > 0);
+
+    const nextNum = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 1001;
+    setBarcode(String(nextNum));
+    setFeedback({
+      type: "success",
+      message: `⚡ تم توليد الكود التسلسلي الذكي (#${nextNum}) تلقائياً!`,
+    });
+    setTimeout(() => setFeedback(null), 3000);
+  };
 
   const defaultGradePrice = groupPrices[groupGrade] ?? DEFAULT_GRADE_PRICES[groupGrade] ?? 100;
 
@@ -61,6 +76,7 @@ export const AddStudentTab: React.FC<AddStudentTabProps> = ({
       parentPhone: normalizedParentPhone || normalizedPhone,
       groupGrade,
       groupDays,
+      groupTime: groupTime.trim() || undefined,
       customMonthlyFee: isCustomFee ? safeCustomMonthlyFee : undefined,
       discountReason: isCustomFee ? discountReason.trim() : undefined,
       points: 0,
@@ -138,13 +154,24 @@ export const AddStudentTab: React.FC<AddStudentTabProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs font-bold font-tajawal">
           <div className="space-y-1.5">
-            <label className="text-slate-300 font-tajawal text-xs">الرقم التسلسلي لكارت الباركود (Barcode) *</label>
+            <div className="flex items-center justify-between">
+              <label className="text-slate-300 font-tajawal text-xs">الرقم التسلسلي لكارت الباركود (Barcode) *</label>
+              <button
+                type="button"
+                onClick={handleGenerateNextBarcode}
+                className="text-xs text-amber-400 hover:text-amber-300 font-bold flex items-center gap-1.5 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 px-3 py-1 rounded-xl transition-all cursor-pointer shadow-sm"
+                title="توليد رقم كارت متسلسل تلقائياً غير مكرر"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-yellow-400" />
+                <span>توليد كود تسلسلي تلقائي ⚡</span>
+              </button>
+            </div>
             <input
               type="text"
               required
               value={barcode}
               onChange={(e) => setBarcode(e.target.value)}
-              placeholder="مرر الكارت أمام الإسكانر أو اكتب الكود..."
+              placeholder="مرر الكارت أمام الإسكانر أو اضغط توليد كود تلقائي..."
               className="w-full bg-[#080d1e] border border-indigo-500/30 focus:border-amber-400 text-amber-300 px-4 py-3 rounded-2xl outline-none font-mono text-sm shadow-inner transition-all"
             />
           </div>
@@ -186,13 +213,13 @@ export const AddStudentTab: React.FC<AddStudentTabProps> = ({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="space-y-1.5">
               <label className="text-slate-300 font-tajawal text-xs">الصف الدراسي *</label>
               <select
                 value={groupGrade}
                 onChange={(e) => setGroupGrade(e.target.value as GradeName)}
-                className="w-full bg-[#080d1e] border border-indigo-500/30 focus:border-amber-400 text-slate-100 px-4 py-3 rounded-2xl outline-none text-sm cursor-pointer transition-all"
+                className="w-full bg-[#080d1e] border border-indigo-500/30 focus:border-amber-400 text-slate-100 px-3 py-3 rounded-2xl outline-none text-xs sm:text-sm cursor-pointer transition-all"
               >
                 {GRADE_ORDER.map((grade) => (
                   <option key={grade} value={grade} className="bg-slate-900 text-white">
@@ -207,10 +234,31 @@ export const AddStudentTab: React.FC<AddStudentTabProps> = ({
               <select
                 value={groupDays}
                 onChange={(e) => setGroupDays(e.target.value as GroupDays)}
-                className="w-full bg-[#080d1e] border border-indigo-500/30 focus:border-amber-400 text-slate-100 px-4 py-3 rounded-2xl outline-none text-sm cursor-pointer transition-all"
+                className="w-full bg-[#080d1e] border border-indigo-500/30 focus:border-amber-400 text-slate-100 px-3 py-3 rounded-2xl outline-none text-xs sm:text-sm cursor-pointer transition-all"
               >
                 <option value="سبت - إثنين - أربعاء" className="bg-slate-900 text-white">سبت - إثنين - أربعاء</option>
                 <option value="أحد - ثلاثاء - خميس" className="bg-slate-900 text-white">أحد - ثلاثاء - خميس</option>
+                <option value="الجمعة مكثف" className="bg-slate-900 text-white">الجمعة (مكثف)</option>
+                <option value="سبت وأربعاء" className="bg-slate-900 text-white">سبت وأربعاء (يومان)</option>
+                <option value="أحد وثلاثاء" className="bg-slate-900 text-white">أحد وثلاثاء (يومان)</option>
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-slate-300 font-tajawal text-xs">موعد الحصة (توقيت المجموعة)</label>
+              <select
+                value={groupTime}
+                onChange={(e) => setGroupTime(e.target.value)}
+                className="w-full bg-[#080d1e] border border-indigo-500/30 focus:border-amber-400 text-amber-300 px-3 py-3 rounded-2xl outline-none text-xs sm:text-sm cursor-pointer transition-all font-mono"
+              >
+                <option value="01:00 م" className="bg-slate-900 text-white">01:00 ظهراً</option>
+                <option value="02:00 م" className="bg-slate-900 text-white">02:00 ظهراً</option>
+                <option value="03:00 م" className="bg-slate-900 text-white">03:00 عصراً</option>
+                <option value="04:00 م" className="bg-slate-900 text-white">04:00 عصراً</option>
+                <option value="05:00 م" className="bg-slate-900 text-white">05:00 مساءً</option>
+                <option value="06:00 م" className="bg-slate-900 text-white">06:00 مساءً</option>
+                <option value="07:00 م" className="bg-slate-900 text-white">07:00 مساءً</option>
+                <option value="08:00 م" className="bg-slate-900 text-white">08:00 مساءً</option>
               </select>
             </div>
           </div>

@@ -620,6 +620,17 @@ export function clearOfflineLocalStorage(): void {
 }
 
 /**
+ * Returns full attendance history record dictionary safely
+ */
+export function getAttendanceHistory(): Record<string, Record<string, string>> {
+  try {
+    return loadLocalData().attendanceHistory || {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Creates a lean local cache suitable for LocalStorage without exceeding browser quota.
  * Keeps 100% of students, users, config, today's scans, today's attendance,
  * and recent 30 days of attendance + recent 3 months of payments.
