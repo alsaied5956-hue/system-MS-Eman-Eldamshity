@@ -63,6 +63,7 @@ import {
   Zap,
   Edit3,
   Check,
+  Trash2,
 } from "lucide-react";
 
 // =========================================================================
@@ -492,15 +493,15 @@ const ScannedTableRow = React.memo<ScannedTableRowProps>(({
           >
             📲 <span className="hidden sm:inline">واتساب</span>
           </button>
-          {onRemove && (
+          {(onRemove || onRemoveFromScanner) && (
             <button
               type="button"
               onClick={handleRemove}
-              className="px-2 py-1 rounded-xl bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
-              title="إزالة من قائمة الاسكانر الحالية"
+              className="px-2.5 py-1 rounded-xl bg-rose-500/15 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/30 text-xs font-bold transition-all inline-flex items-center gap-1 cursor-pointer shadow-sm hover:shadow-rose-500/20"
+              title="إلغاء مسح هذا الطالب وحذفه من طابور الحضور بالقاعة (كارت بالخطأ)"
             >
-              <X className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">إزالة</span>
+              <Trash2 className="w-3.5 h-3.5 text-rose-400 group-hover:text-white" />
+              <span>إلغاء المسح</span>
             </button>
           )}
         </div>
@@ -648,6 +649,9 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     crossDay?: number;
     queueItems?: { student: Student; message: string; type: "غائب" | "تأخير" | "عكس_أيام" }[];
   } | null>(null);
+
+  // حالة تأكيد حذف طالب من طابور الحضور بالقاعة (كارت مسح بالخطأ)
+  const [studentToRemove, setStudentToRemove] = useState<{ student: Student; barcode: string } | null>(null);
 
   const [scanDirectionMode, setScanDirectionMode] = useState<"entry" | "exit">("entry");
   const [scanAlert, setScanAlert] = useState<{
@@ -1138,11 +1142,62 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   }, [selectedManualStudent, processAttendance]);
 
   const handleRemoveFromQueue = useCallback((barcode: string) => {
-    setScannerQueue((prev) => prev.filter((b) => b !== barcode));
-    if (onRemoveFromScanner) {
-      onRemoveFromScanner(barcode);
+    const clean = String(barcode).trim();
+    const st = studentMap.get(clean) || (students || []).find((s) => String(s.barcode).trim() === clean);
+    if (st) {
+      setStudentToRemove({ student: st, barcode: clean });
+    } else {
+      setScannerQueue((prev) => prev.filter((b) => String(b).trim() !== clean));
+      if (onRemoveFromScanner) {
+        onRemoveFromScanner(clean);
+      }
     }
-  }, [onRemoveFromScanner]);
+  }, [studentMap, students, onRemoveFromScanner]);
+
+  const handleConfirmRemoveStudent = useCallback(() => {
+    if (!studentToRemove) return;
+    const { barcode, student } = studentToRemove;
+    const clean = String(barcode).trim();
+
+    // 1. Remove from local scanner queue immediately
+    setScannerQueue((prev) => prev.filter((b) => String(b).trim() !== clean));
+
+    // 2. Clear from session isolation map & scan sources
+    setScannedSessionMap((prev) => {
+      const next = { ...prev };
+      delete next[clean];
+      try {
+        sessionStorage.setItem("aiman_scanner_session_map", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+
+    setScanSources((prev) => {
+      const next = { ...prev };
+      delete next[clean];
+      try {
+        sessionStorage.setItem("aiman_scan_sources", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+
+    // 3. Clear scan alert if it currently shows this student
+    setScanAlert((prev) => {
+      if (prev?.student?.barcode === clean) return null;
+      return prev;
+    });
+
+    // 4. Trigger parent removal handler to purge from attendanceToday, storage, and cloud
+    if (onRemoveFromScanner) {
+      onRemoveFromScanner(clean);
+    }
+
+    // 5. Success toast
+    setSessionResetSuccessNotice(`✅ تم حذف الطالب (${student.name}) وإلغاء تسجيل حضوره اليوم بنجاح، ويمكن الآن مسح كارت الطالب الصحيح.`);
+    setTimeout(() => setSessionResetSuccessNotice(null), 5000);
+
+    setStudentToRemove(null);
+  }, [studentToRemove, onRemoveFromScanner]);
 
   const handleOpenManualModal = useCallback(() => {
     setManualModalTab("manual_search");
@@ -2396,7 +2451,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                       isCrossDayMakeup={isCrossDayMakeup}
                       source={scanSources[barcode] || "scanner"}
                       onSendWhatsApp={handleSendWhatsApp}
-                      onRemoveFromScanner={onRemoveFromScanner ? handleRemoveFromQueue : undefined}
+                      onRemove={handleRemoveFromQueue}
+                      onRemoveFromScanner={handleRemoveFromQueue}
                     />
                   );
                 })
@@ -2843,6 +2899,81 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                 className="w-full py-2.5 rounded-2xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs transition-colors"
               >
                 إغلاق نافذة الفحص
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal: Remove Student & Cancel Attendance (حذف الطالب وإلغاء المسح) */}
+      {studentToRemove && (
+        <div className="fixed inset-0 bg-black/85 z-50 flex items-center justify-center p-4">
+          <div className="bg-[#0b1226] border-2 border-rose-500/40 w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-4 animate-in fade-in zoom-in-95 font-tajawal text-right">
+            <div className="flex items-center justify-between pb-3 border-b border-rose-500/20">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-rose-300">
+                    حذف الطالب وإلغاء المسح من القاعة
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    في حالة مسح كارت بالخطأ أو كارت لا يخص الطالب
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStudentToRemove(null)}
+                className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-2.5 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-xs">اسم الطالب:</span>
+                <span className="text-white font-bold">{studentToRemove.student.name}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-xs">كود الباركود:</span>
+                <span className="font-mono text-amber-300 font-bold">{studentToRemove.barcode}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 text-xs">الصف والمجموعة:</span>
+                <span className="text-indigo-300 font-medium text-xs">
+                  {studentToRemove.student.groupGrade} • {studentToRemove.student.groupDays}
+                </span>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-xs text-rose-200 leading-relaxed space-y-1">
+              <p className="font-bold flex items-center gap-1.5 text-rose-300">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                تنبيه عملي هام:
+              </p>
+              <p>
+                سيتم حذف هذا الطالب فورياً من طابور الحضور بالقاعة وإلغاء تسجيل حضوره اليوم من الشاشة والسحابة، ليتمكن الطالب الحقيقي صاحب الكارت الصحيح من مسح كارته وتسجيل حضوره بنجاح.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleConfirmRemoveStudent}
+                className="flex-1 py-3 px-4 rounded-2xl bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 text-white font-bold text-xs shadow-lg shadow-rose-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>نعم، احذف الطالب وألغِ الحضور</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStudentToRemove(null)}
+                className="py-3 px-5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-colors cursor-pointer"
+              >
+                تراجع
               </button>
             </div>
           </div>

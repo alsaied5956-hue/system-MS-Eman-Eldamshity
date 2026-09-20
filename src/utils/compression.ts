@@ -45,10 +45,13 @@ function compactStudent(s: any): any {
   };
   if (s.phone && s.phone !== "0" && s.phone !== "") c.p = s.phone;
   if (s.parentPhone && s.parentPhone !== "0" && s.parentPhone !== "") c.pp = s.parentPhone;
+  if (s.groupTime) c.gt = s.groupTime;
   if (s.points) c.pts = s.points;
   if (s.totalAttendanceDays) c.ad = s.totalAttendanceDays;
   if (s.totalAbsentDays) c.abd = s.totalAbsentDays;
   if (Array.isArray(s.totalExamScores) && s.totalExamScores.length > 0) c.es = s.totalExamScores;
+  if (Array.isArray(s.homeworkLogs) && s.homeworkLogs.length > 0) c.hw = s.homeworkLogs;
+  if (Array.isArray(s.examHistory) && s.examHistory.length > 0) c.eh = s.examHistory;
   if (s.customMonthlyFee !== undefined) c.fee = s.customMonthlyFee;
   if (s.discountReason) c.dr = s.discountReason;
   if (s.lastExamTitle) c.let = s.lastExamTitle;
@@ -66,12 +69,15 @@ function hydrateStudent(raw: any): any {
     name: String(raw.n || ""),
     groupGrade: raw.g || "الصف الرابع الابتدائي",
     groupDays: raw.d || "سبت - إثنين - أربعاء",
+    groupTime: raw.gt || raw.groupTime || undefined,
     phone: String(raw.p || "0"),
     parentPhone: String(raw.pp || "0"),
     points: Number(raw.pts || 0),
     totalAttendanceDays: Number(raw.ad || 0),
     totalAbsentDays: Number(raw.abd || 0),
     totalExamScores: Array.isArray(raw.es) ? raw.es : [],
+    homeworkLogs: Array.isArray(raw.hw) ? raw.hw : Array.isArray(raw.homeworkLogs) ? raw.homeworkLogs : undefined,
+    examHistory: Array.isArray(raw.eh) ? raw.eh : Array.isArray(raw.examHistory) ? raw.examHistory : undefined,
     customMonthlyFee: raw.fee,
     discountReason: raw.dr,
     lastExamTitle: raw.let || "",

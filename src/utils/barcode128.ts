@@ -76,9 +76,17 @@ export function generateCode128Svg(text: string, height = 48, barWidth = 2): str
 }
 
 /**
- * Returns an SVG data URL for Code-128
+ * Returns an SVG data URL for Code-128 (Base64 encoded for universal printer and browser compatibility)
  */
 export function generateCode128DataUrl(text: string, height = 48, barWidth = 2): string {
   const svg = generateCode128Svg(text, height, barWidth);
+  try {
+    if (typeof Buffer !== "undefined") {
+      return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+    }
+    if (typeof window !== "undefined" && typeof window.btoa === "function") {
+      return `data:image/svg+xml;base64,${window.btoa(unescape(encodeURIComponent(svg)))}`;
+    }
+  } catch {}
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }

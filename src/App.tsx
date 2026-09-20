@@ -1192,16 +1192,82 @@ export default function App() {
     }
   }, [attendanceToday, attendanceHistory, scanLogOrder, scanLogTimes, students, currentUser]);
 
-  // Handler: Remove single student from active scanner screen
-  const handleRemoveFromScanner = useCallback((barcode: string) => {
-    const updatedOrder = scanLogOrder.filter((b) => b !== barcode);
-    const updatedTimes = { ...scanLogTimes };
-    delete updatedTimes[barcode];
+  // Handler: Remove single student from active scanner screen & cancel attendance (e.g. wrong card scanned)
+  const handleRemoveFromScanner = useCallback(async (barcode: string) => {
+    const cleanBarcode = String(barcode).trim();
+    if (!cleanBarcode) return;
+    const todayKey = getTodayKey();
 
+    // 1. Compute filtered scan queue & times
+    const updatedOrder = (scanLogOrderRef.current || scanLogOrder).filter(
+      (b) => String(b).trim() !== cleanBarcode
+    );
+    const updatedTimes = { ...(scanLogTimesRef.current || scanLogTimes) };
+    delete updatedTimes[cleanBarcode];
+
+    // 2. Remove from today's attendance & history
+    const priorStatus = attendanceTodayRef.current?.[cleanBarcode] || attendanceToday?.[cleanBarcode];
+    const updatedToday = { ...(attendanceTodayRef.current || attendanceToday) };
+    delete updatedToday[cleanBarcode];
+
+    const updatedHistory = { ...(attendanceHistoryRef.current || attendanceHistory) };
+    if (updatedHistory[todayKey]) {
+      const dayData = { ...updatedHistory[todayKey] };
+      delete dayData[cleanBarcode];
+      updatedHistory[todayKey] = dayData;
+    }
+
+    // 3. Rollback totalAttendanceDays if student was recorded as present/late
+    let updatedStudents = appStudentsRef.current || students;
+    if (priorStatus && priorStatus !== "غائب") {
+      updatedStudents = updatedStudents.map((s) => {
+        if (String(s.barcode).trim() === cleanBarcode) {
+          return {
+            ...s,
+            totalAttendanceDays: Math.max(0, (s.totalAttendanceDays || 0) - 1),
+          };
+        }
+        return s;
+      });
+    }
+
+    // 4. Update authoritative refs immediately
+    scanLogOrderRef.current = updatedOrder;
+    scanLogTimesRef.current = updatedTimes;
+    attendanceTodayRef.current = updatedToday;
+    attendanceHistoryRef.current = updatedHistory;
+    appStudentsRef.current = updatedStudents;
+
+    // 5. Update React state
     setScanLogOrder(updatedOrder);
     setScanLogTimes(updatedTimes);
+    setAttendanceToday(updatedToday);
+    setAttendanceHistory(updatedHistory);
+    setStudents(updatedStudents);
+
+    // 6. Save batch locally & record tombstone
+    saveAttendanceDeletedKey(todayKey, cleanBarcode);
+    saveAttendanceAndStudentsBatch(updatedToday, updatedOrder, updatedTimes, updatedStudents, false);
     saveScanLogData(updatedOrder, updatedTimes);
-  }, [scanLogOrder, scanLogTimes]);
+
+    // 7. Cloud persistence & multi-device realtime sync
+    try {
+      await cloudDeleteAttendance(cleanBarcode, todayKey);
+    } catch (err) {
+      console.warn("[App] Cloud delete attendance warning:", err);
+    }
+    dualSyncAttendanceDelete(cleanBarcode, todayKey);
+
+    const targetStudent = updatedStudents.find((s) => String(s.barcode).trim() === cleanBarcode);
+    const studentName = targetStudent?.name || `كود ${cleanBarcode}`;
+
+    setSyncBanner({
+      show: true,
+      type: "online-synced",
+      message: `🗑️ تم إلغاء مسح وحذف الطالب (${studentName}) من طابور الحضور اليوم بنجاح!`,
+    });
+    setTimeout(() => setSyncBanner(null), 4000);
+  }, [scanLogOrder, scanLogTimes, attendanceToday, attendanceHistory, students]);
 
   // Handler: Clear current session scans for a grade with full isolation from previous classes
   const handleClearSessionScans = useCallback((grade: GradeName, resetTodayAttendance = false) => {
