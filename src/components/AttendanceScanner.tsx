@@ -59,6 +59,9 @@ import {
   Activity,
   Wifi,
   ShieldCheck,
+  Zap,
+  Edit3,
+  Check,
 } from "lucide-react";
 
 // =========================================================================
@@ -66,14 +69,16 @@ import {
 // =========================================================================
 
 interface ScannerInputBarProps {
-  onScan?: (code: string) => void;
-  onScanned?: (code: string) => void;
+  onScan?: (code: string, source?: "scanner" | "manual", overrideStatus?: "حضور" | "تأخير") => void;
+  onScanned?: (code: string, source?: "scanner" | "manual", overrideStatus?: "حضور" | "تأخير") => void;
   inputRef: React.RefObject<HTMLInputElement | null>;
   onBlur: (e: React.FocusEvent<HTMLInputElement>) => void;
   scanDirectionMode?: "entry" | "exit";
   onOpenManualModal: () => void;
   onOpenOtherDaysModal: () => void;
   onOpenCameraScanner: () => void;
+  students?: Student[];
+  selectedGrade?: GradeName;
 }
 
 const ScannerInputBar = React.memo<ScannerInputBarProps>(({
@@ -85,30 +90,101 @@ const ScannerInputBar = React.memo<ScannerInputBarProps>(({
   onOpenManualModal,
   onOpenOtherDaysModal,
   onOpenCameraScanner,
+  students,
+  selectedGrade,
 }) => {
+  // ⚡ Explicit Mode: "scanner" (Auto Barcode reader) or "manual" (Manual typing)
+  const [inputMode, setInputMode] = useState<"scanner" | "manual">("scanner");
+  const [manualStatus, setManualStatus] = useState<"حضور" | "تأخير">("حضور");
   const [localInput, setLocalInput] = useState("");
+
+  // Track keystroke timestamps to profile hardware scanner burst (< 45ms) vs human typing
+  const keyTimestampsRef = useRef<number[]>([]);
+  const lastScannedCardRef = useRef<{ code: string; time: number }>({ code: "", time: 0 });
   const isSubmittingRef = useRef(false);
+
+  // Live autocomplete results in manual mode
+  const quickManualMatches = useMemo(() => {
+    if (inputMode !== "manual") return [];
+    const query = localInput.trim().toLowerCase();
+    if (query.length < 2 || !students) return [];
+
+    return students
+      .filter((s) => {
+        const barcodeMatch = String(s.barcode).toLowerCase().includes(query);
+        const nameMatch = s.name.toLowerCase().includes(query);
+        const phoneMatch = s.phone ? String(s.phone).includes(query) : false;
+        return barcodeMatch || nameMatch || phoneMatch;
+      })
+      .slice(0, 4);
+  }, [inputMode, localInput, students]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setLocalInput(e.target.value);
   }, []);
 
-  const doScan = useCallback((rawCode: string) => {
+  const doScan = useCallback((
+    rawCode: string,
+    forcedSource?: "scanner" | "manual",
+    explicitStatus?: "حضور" | "تأخير"
+  ) => {
     const code = normalizeBarcode(rawCode);
+
+    // 🛑 CRITICAL FIX: ALWAYS clear input state & DOM value immediately so numbers never stay stuck!
+    setLocalInput("");
+    if (inputRef.current) {
+      inputRef.current.value = "";
+    }
+
     if (!code) return;
+
+    // Detect hardware scanner burst (< 50ms average interval between keys)
+    const timestamps = keyTimestampsRef.current;
+    let isHardwareBurst = false;
+    if (timestamps.length >= 2) {
+      const intervals: number[] = [];
+      for (let i = 1; i < timestamps.length; i++) {
+        intervals.push(timestamps[i] - timestamps[i - 1]);
+      }
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      isHardwareBurst = avgInterval < 50;
+    }
+    keyTimestampsRef.current = [];
+
+    const effectiveSource: "scanner" | "manual" =
+      forcedSource ||
+      (isHardwareBurst ? "scanner" : (inputMode === "scanner" ? "scanner" : "manual"));
+
+    const now = Date.now();
+
+    // 🛑 Anti-Holding Cooldown Protection:
+    // If the card is held in front of the scanner, it emits repeated scans every 200-400ms.
+    // We safely debounce identical barcode triggers within 1500ms, while keeping the input 100% empty.
+    if (
+      effectiveSource === "scanner" &&
+      lastScannedCardRef.current.code === code &&
+      now - lastScannedCardRef.current.time < 1500
+    ) {
+      // Repeat scan of held card: smoothly ignored!
+      return;
+    }
+
+    lastScannedCardRef.current = { code, time: now };
+
     if (isSubmittingRef.current) return;
     isSubmittingRef.current = true;
     setTimeout(() => {
       isSubmittingRef.current = false;
-    }, 250);
+    }, 200);
 
-    setLocalInput("");
+    const statusToUse = explicitStatus || (effectiveSource === "manual" ? manualStatus : undefined);
+
     if (typeof onScan === "function") {
-      onScan(code);
+      onScan(code, effectiveSource, statusToUse);
     } else if (typeof onScanned === "function") {
-      onScanned(code);
+      onScanned(code, effectiveSource, statusToUse);
     }
-  }, [onScan, onScanned]);
+  }, [inputMode, manualStatus, onScan, onScanned, inputRef]);
 
   const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
@@ -120,6 +196,11 @@ const ScannerInputBar = React.memo<ScannerInputBarProps>(({
   }, [localInput, doScan]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    keyTimestampsRef.current.push(Date.now());
+    if (keyTimestampsRef.current.length > 25) {
+      keyTimestampsRef.current.shift();
+    }
+
     if (e.key === "Enter") {
       e.preventDefault();
       e.stopPropagation();
@@ -131,54 +212,178 @@ const ScannerInputBar = React.memo<ScannerInputBarProps>(({
   }, [localInput, doScan]);
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-wrap sm:flex-nowrap gap-2.5">
-      <div className="relative flex-1 group min-w-[260px]">
-        <input
-          ref={inputRef}
-          type="text"
-          value={localInput}
-          onChange={handleChange}
-          onBlur={onBlur}
-          onKeyDown={handleKeyDown}
-          placeholder="مرر كارت الطالب أمام الإسكانر أو اكتب الكود..."
-          className="w-full bg-[#060a17] border-2 border-indigo-500/40 focus:border-amber-400 text-amber-300 text-center font-mono font-black text-2xl md:text-3xl px-4 py-4 rounded-3xl outline-none focus:ring-4 focus:ring-amber-400/20 shadow-2xl placeholder:text-slate-600 placeholder:text-base transition-all"
-        />
-        <ScanLine className="w-7 h-7 text-amber-400/70 absolute left-4 top-4 pointer-events-none animate-pulse" />
+    <div className="space-y-2.5">
+      {/* Mode Switcher Tabs: Barcode Scanner vs Manual Registration */}
+      <div className="flex flex-wrap items-center justify-between gap-2 font-tajawal">
+        <div className="inline-flex p-1 rounded-2xl bg-slate-900/90 border border-slate-700/80 shadow-md">
+          <button
+            type="button"
+            onClick={() => {
+              setInputMode("scanner");
+              setLocalInput("");
+              inputRef.current?.focus({ preventScroll: true });
+            }}
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer ${
+              inputMode === "scanner"
+                ? "bg-gradient-to-r from-amber-500 to-emerald-500 text-slate-950 shadow-lg shadow-amber-500/20 font-bold"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5" />
+            <span>⚡ مسح الباركود الآلي</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setInputMode("manual");
+              setLocalInput("");
+              inputRef.current?.focus({ preventScroll: true });
+            }}
+            className={`px-3.5 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer ${
+              inputMode === "manual"
+                ? "bg-gradient-to-r from-sky-500 to-cyan-400 text-slate-950 shadow-lg shadow-cyan-500/20 font-bold"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            <Edit3 className="w-3.5 h-3.5" />
+            <span>✍️ تسجيل يدوي مباشر</span>
+          </button>
+        </div>
+
+        {/* Quick status toggle when in Manual Registration mode */}
+        {inputMode === "manual" && (
+          <div className="flex items-center gap-1.5 p-1 rounded-2xl bg-slate-900/90 border border-slate-700/80 text-xs">
+            <span className="text-[11px] text-slate-400 px-1 font-bold">الحالة:</span>
+            <button
+              type="button"
+              onClick={() => setManualStatus("حضور")}
+              className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
+                manualStatus === "حضور"
+                  ? "bg-emerald-500/30 text-emerald-300 border border-emerald-500/50"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              🟢 حضور
+            </button>
+            <button
+              type="button"
+              onClick={() => setManualStatus("تأخير")}
+              className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
+                manualStatus === "تأخير"
+                  ? "bg-amber-500/30 text-amber-300 border border-amber-500/50"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              🟡 تأخير
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Button 0: Camera Barcode/QR Scanner */}
-      <button
-        type="button"
-        onClick={onOpenCameraScanner}
-        className="px-4 py-3.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-emerald-600/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-emerald-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
-        title="مسح كارت الطالب عبر كاميرا الموبايل أو اللابتوب"
-      >
-        <Camera className="w-5 h-5" />
-        <span>مسح بالكاميرا 📷</span>
-      </button>
+      <form onSubmit={handleSubmit} className="flex flex-wrap sm:flex-nowrap gap-2.5 relative">
+        <div className="relative flex-1 group min-w-[260px]">
+          <input
+            ref={inputRef}
+            type="text"
+            value={localInput}
+            onChange={handleChange}
+            onBlur={onBlur}
+            onKeyDown={handleKeyDown}
+            placeholder={
+              inputMode === "scanner"
+                ? "مرر كارت الطالب أمام الإسكانر (مسح فائق السرعة)..."
+                : "اكتب كود الطالب، أو رقم الهاتف، أو اسمه للتسجيل اليدوي..."
+            }
+            className={`w-full bg-[#060a17] border-2 ${
+              inputMode === "scanner"
+                ? "border-amber-500/50 focus:border-amber-400 text-amber-300 focus:ring-amber-400/20"
+                : "border-sky-500/50 focus:border-sky-400 text-sky-200 focus:ring-sky-400/20"
+            } text-center font-mono font-black text-2xl md:text-3xl px-4 py-4 rounded-3xl outline-none focus:ring-4 shadow-2xl placeholder:text-slate-600 placeholder:text-base transition-all`}
+          />
+          {inputMode === "scanner" ? (
+            <ScanLine className="w-7 h-7 text-amber-400/70 absolute left-4 top-4 pointer-events-none animate-pulse" />
+          ) : (
+            <Edit3 className="w-7 h-7 text-sky-400/70 absolute left-4 top-4 pointer-events-none" />
+          )}
 
-      {/* Button 1: Smart Manual Search */}
-      <button
-        type="button"
-        onClick={onOpenManualModal}
-        className="px-4 py-3.5 bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-slate-950 font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-cyan-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-cyan-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
-        title="بحث بالاسم أو الكود للتحضير اليدوي"
-      >
-        <PlusCircle className="w-5 h-5" />
-        <span>بحث يدوي ذكي</span>
-      </button>
+          {/* Quick autocomplete dropdown for manual typing */}
+          {quickManualMatches.length > 0 && (
+            <div className="absolute top-full right-0 left-0 mt-2 z-50 bg-[#0c1322] border-2 border-sky-500/40 rounded-2xl shadow-2xl p-2 space-y-1 text-right animate-in fade-in zoom-in-95 font-tajawal">
+              <div className="text-[11px] text-sky-400 px-2 py-1 font-bold border-b border-slate-800 flex items-center justify-between">
+                <span>💡 نتائج مطابقة سريعة (اضغط لتسجيل الحضور فوراً):</span>
+                <span className="text-[10px] text-slate-400">حالة: ({manualStatus})</span>
+              </div>
+              {quickManualMatches.map((st) => (
+                <button
+                  key={st.barcode}
+                  type="button"
+                  onClick={() => {
+                    doScan(st.barcode, "manual", manualStatus);
+                  }}
+                  className="w-full text-right p-2.5 rounded-xl hover:bg-sky-500/20 text-slate-200 hover:text-white flex items-center justify-between transition-colors cursor-pointer group"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono font-bold text-amber-300">#{st.barcode}</span>
+                    <span className="font-bold">{st.name}</span>
+                    <span className="text-xs text-slate-400">({st.groupGrade} - {st.groupDays})</span>
+                  </div>
+                  <span className="text-xs font-bold text-sky-400 group-hover:underline">
+                    تسجيل {manualStatus} ✍️
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
-      {/* Button 2: Cross-Day Makeup Attendance for Same Grade */}
-      <button
-        type="button"
-        onClick={onOpenOtherDaysModal}
-        className="px-4 py-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs md:text-sm rounded-3xl shadow-xl shadow-amber-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-amber-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
-        title="حضور طالب من أيام أخرى لنفس الصف الدراسي"
-      >
-        <UserPlus className="w-5 h-5" />
-        <span>👥 حضور طالب من يوم آخر (تعويض)</span>
-      </button>
-    </form>
+        {/* In Manual mode: Explicit Submit Button */}
+        {inputMode === "manual" && (
+          <button
+            type="submit"
+            disabled={!localInput.trim()}
+            className="px-5 py-3.5 bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 disabled:opacity-40 text-slate-950 font-black text-xs md:text-sm rounded-3xl shadow-xl shadow-cyan-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-cyan-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
+            title="تسجيل الحضور اليدوي للطالب"
+          >
+            <UserCheck className="w-5 h-5" />
+            <span>تسجيل يدوي ✍️</span>
+          </button>
+        )}
+
+        {/* Button 0: Camera Barcode/QR Scanner */}
+        <button
+          type="button"
+          onClick={onOpenCameraScanner}
+          className="px-4 py-3.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-emerald-600/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-emerald-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
+          title="مسح كارت الطالب عبر كاميرا الموبايل أو اللابتوب"
+        >
+          <Camera className="w-5 h-5" />
+          <span>مسح بالكاميرا 📷</span>
+        </button>
+
+        {/* Button 1: Smart Manual Search */}
+        <button
+          type="button"
+          onClick={onOpenManualModal}
+          className="px-4 py-3.5 bg-gradient-to-r from-sky-500 to-cyan-400 hover:from-sky-400 hover:to-cyan-300 text-slate-950 font-bold text-xs md:text-sm rounded-3xl shadow-xl shadow-cyan-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-cyan-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
+          title="بحث بالاسم أو الكود للتحضير اليدوي"
+        >
+          <PlusCircle className="w-5 h-5" />
+          <span>بحث شامل</span>
+        </button>
+
+        {/* Button 2: Cross-Day Makeup Attendance for Same Grade */}
+        <button
+          type="button"
+          onClick={onOpenOtherDaysModal}
+          className="px-4 py-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-black text-xs md:text-sm rounded-3xl shadow-xl shadow-amber-500/20 transition-all flex items-center gap-2 shrink-0 cursor-pointer border border-amber-300/40 transform hover:scale-[1.02] active:scale-95 font-tajawal"
+          title="حضور طالب من أيام أخرى لنفس الصف الدراسي"
+        >
+          <UserPlus className="w-5 h-5" />
+          <span>👥 حضور طالب تعويض</span>
+        </button>
+      </form>
+    </div>
   );
 });
 ScannerInputBar.displayName = "ScannerInputBar";
@@ -193,6 +398,7 @@ interface ScannedTableRowProps {
   isCrossDayMakeup: boolean;
   selectedGrade?: string;
   selectedDays?: string;
+  source?: "scanner" | "manual";
   onSendWhatsApp: (student: Student, isCrossDay: boolean, status: string, time: string) => void;
   onRemove?: (barcode: string) => void;
   onRemoveFromScanner?: (barcode: string) => void;
@@ -208,6 +414,7 @@ const ScannedTableRow = React.memo<ScannedTableRowProps>(({
   isCrossDayMakeup,
   selectedGrade,
   selectedDays,
+  source = "scanner",
   onSendWhatsApp,
   onRemove,
   onRemoveFromScanner,
@@ -260,6 +467,17 @@ const ScannedTableRow = React.memo<ScannedTableRowProps>(({
           }`}
         >
           {statusToday === "تأخير" ? "🟡 تأخير" : "🟢 حضور"}
+        </span>
+      </td>
+      <td className="p-3.5">
+        <span
+          className={`font-bold text-[11px] px-2.5 py-1 rounded-full inline-flex items-center gap-1.5 ${
+            source === "manual"
+              ? "bg-sky-500/15 text-sky-300 border border-sky-500/40"
+              : "bg-amber-500/15 text-amber-300 border border-amber-500/40"
+          }`}
+        >
+          {source === "manual" ? "✍️ يدوي" : "⚡ باركود"}
         </span>
       </td>
       <td className="p-3.5 font-mono text-slate-300">{formattedTime}</td>
@@ -440,7 +658,19 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     status?: string;
     isPaid?: boolean;
     canAcceptMakeup?: boolean;
+    source?: "scanner" | "manual";
   } | null>(null);
+
+  // Track scan sources: "scanner" (Auto Barcode reader) vs "manual" (Manual typing/search)
+  const [scanSources, setScanSources] = useState<Record<string, "scanner" | "manual">>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const stored = sessionStorage.getItem("aiman_scan_sources");
+        if (stored) return JSON.parse(stored);
+      } catch {}
+    }
+    return {};
+  });
 
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -621,7 +851,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
 
   const processAttendance = useCallback((
     student: Student,
-    overrideStatus?: "حضور" | "تأخير"
+    overrideStatus?: "حضور" | "تأخير",
+    source: "scanner" | "manual" = "scanner"
   ) => {
     setFinishedBanner(null);
 
@@ -637,6 +868,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         title: "🚫 غير مسموح: طالب من صف دراسي مختلف!",
         message: `الطالب (${student.name}) مقيد في [${student.groupGrade}]، بينما الحصة الحالية بالقاعة مخصصة لـ [${targetGrade}]. غير مسموح بدخول طلاب من صفوف دراسية أخرى!`,
         student,
+        source,
       });
       return;
     }
@@ -660,9 +892,22 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         student,
         time: existingTimeStr,
         status: existingStatus,
+        source,
       });
       return;
     }
+
+    // ⚡ Store source ("scanner" vs "manual") for this student in current session
+    setScanSources((prev) => {
+      const clean = String(student.barcode).trim();
+      const updated = { ...prev, [clean]: source };
+      if (typeof window !== "undefined") {
+        try {
+          sessionStorage.setItem("aiman_scan_sources", JSON.stringify(updated));
+        } catch {}
+      }
+      return updated;
+    });
 
     // ⚡ Optimistic UI: Add student barcode to local scannerQueue state immediately
     setScannerQueue((prev) => {
@@ -705,7 +950,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         timeIso: now.toISOString(),
         timeDisplay: nowTimeStr,
         isPaid,
-        scannedBy: "الماسح السريع",
+        scannedBy: source === "scanner" ? "الماسح السريع (باركود)" : "تسجيل يدوي",
         studentFallback: student,
         sourceDeviceId: getPersistentDeviceId(),
       });
@@ -727,6 +972,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       time: nowTimeStr,
       status: calculatedStatus,
       isPaid,
+      source,
     });
   }, []);
 
@@ -749,15 +995,19 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   }, [onClearSessionScans, selectedGrade]);
 
   // 🎯 Core Scan Processing Function (Normalizes input, strips prefixes, deduplicates, finds student)
-  const processScannedCode = useCallback((rawCode: string) => {
+  const processScannedCode = useCallback((
+    rawCode: string,
+    source: "scanner" | "manual" = "scanner",
+    overrideStatus?: "حضور" | "تأخير"
+  ) => {
     const clean = normalizeBarcode(rawCode);
     if (!clean) return;
 
-    // Deduplication lock: prevent duplicate scans triggered within 600ms
+    // Deduplication lock: prevent duplicate scans triggered within 1500ms (especially if card is held in front of scanner)
     const nowMs = Date.now();
     if (
       lastScannedDedupeRef.current.code === clean &&
-      nowMs - lastScannedDedupeRef.current.time < 600
+      nowMs - lastScannedDedupeRef.current.time < 1500
     ) {
       return;
     }
@@ -766,11 +1016,21 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     const matchResult = findStudentByScannedCode(clean, studentsRef.current, studentMapRef.current);
 
     if (!matchResult) {
+      // In manual entry, check if user typed part of student name
+      const nameMatch = (studentsRef.current || []).find((s) =>
+        s.name.trim().toLowerCase().includes(clean.toLowerCase())
+      );
+      if (nameMatch) {
+        processAttendance(nameMatch, overrideStatus, source);
+        return;
+      }
+
       playBeep("error");
       setScanAlert({
         type: "error",
         title: "❌ كود غير مسجل في المنظومة",
-        message: `تمت قراءة الكود (${clean}) ولكن لا يوجد طالب مسجل بهذا الكود أو الباركود أو رقم الهاتف! يرجى إضافة الطالب أولاً أو مراجعة الكود.`,
+        message: `تم البحث عن (${clean}) ولكن لا يوجد طالب مسجل بهذا الكود أو الباركود أو رقم الهاتف! يرجى مراجعة الكود أو إضافة الطالب.`,
+        source,
       });
       return;
     }
@@ -797,11 +1057,12 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         student,
         time: nowTimeStr,
         status: "خروج",
+        source,
       });
       return;
     }
 
-    processAttendance(student);
+    processAttendance(student, overrideStatus, source);
   }, [processAttendance]);
 
   // ⚡ Global Hardware USB Barcode Scanner Listener (Rock-solid, attached once, never drops keystrokes)
@@ -835,7 +1096,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
           e.preventDefault();
           const scanned = keyBuffer.trim();
           keyBuffer = "";
-          processScannedCode(scanned);
+          processScannedCode(scanned, "scanner");
         } else {
           keyBuffer = "";
         }
@@ -859,12 +1120,12 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   const handleRecordManual = useCallback((status: "حضور" | "تأخير", studentToRecord?: Student) => {
     const target = studentToRecord || selectedManualStudent;
     if (!target) return;
-    processAttendance(target, status);
+    processAttendance(target, status, "manual");
     setIsManualModalOpen(false);
     setSelectedManualStudent(null);
     setManualSearchQuery("");
     setOtherDaysSearchQuery("");
-  }, [processAttendance, selectedManualStudent]);
+  }, [selectedManualStudent, processAttendance]);
 
   const handleRemoveFromQueue = useCallback((barcode: string) => {
     setScannerQueue((prev) => prev.filter((b) => b !== barcode));
@@ -1545,6 +1806,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
           onOpenCameraScanner={handleOpenCameraScanner}
           inputRef={inputRef}
           onBlur={handleInputBlur}
+          students={students}
+          selectedGrade={selectedGrade}
         />
 
         {/* Real-time Multi-Device Sync Diagnostics Bar */}
@@ -1916,6 +2179,18 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                     </span>
                   )}
 
+                  {scanAlert.source && (
+                    <span
+                      className={`text-xs px-3 py-1 rounded-full font-bold border font-tajawal flex items-center gap-1 ${
+                        scanAlert.source === "manual"
+                          ? "bg-sky-500/20 text-sky-300 border-sky-500/40"
+                          : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                      }`}
+                    >
+                      {scanAlert.source === "manual" ? "✍️ تسجيل يدوي معتمد" : "⚡ مسح باركود آلي"}
+                    </span>
+                  )}
+
                   {scanAlert.student.customMonthlyFee !== undefined && (
                     <span className="text-xs px-3 py-1 rounded-full font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 font-tajawal">
                       🏷️ اشتراك مخصص: {scanAlert.student.customMonthlyFee} ج.م
@@ -1975,10 +2250,16 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       <div className="glass-panel rounded-3xl p-4 md:p-6 shadow-2xl overflow-hidden space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-indigo-500/20">
           <div className="flex items-center gap-3">
-            <h3 className="font-bold text-base md:text-lg text-amber-300 flex items-center gap-2 font-fancy">
+            <h3 className="font-bold text-base md:text-lg text-amber-300 flex flex-wrap items-center gap-2 font-fancy">
               <span>📋 طابور حضور القاعة بالسكانر</span>
               <span className="bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs px-3 py-0.5 rounded-full font-bold">
                 {filteredBarcodes.length} طالب حاضر
+              </span>
+              <span className="bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[11px] px-2.5 py-0.5 rounded-full font-bold">
+                ⚡ باركود: {filteredBarcodes.filter(b => (scanSources[b] || "scanner") === "scanner").length}
+              </span>
+              <span className="bg-sky-500/15 text-sky-300 border border-sky-500/30 text-[11px] px-2.5 py-0.5 rounded-full font-bold">
+                ✍️ يدوي: {filteredBarcodes.filter(b => scanSources[b] === "manual").length}
               </span>
             </h3>
           </div>
@@ -2037,6 +2318,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                 <th className="p-3.5">المرحلة والمجموعة</th>
                 <th className="p-3.5">الاشتراك الشهري</th>
                 <th className="p-3.5">حالة الدخول</th>
+                <th className="p-3.5">طريقة التسجيل</th>
                 <th className="p-3.5">وقت التسجيل</th>
                 <th className="p-3.5 text-center">إجراءات ومراسلة</th>
               </tr>
@@ -2044,12 +2326,12 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
             <tbody className="divide-y divide-indigo-950/50">
               {filteredBarcodes.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="p-10 text-center text-slate-400 space-y-2">
+                  <td colSpan={9} className="p-10 text-center text-slate-400 space-y-2">
                     <p className="text-sm font-bold text-slate-300 font-fancy">
                       في انتظار قراءة أول كارت بالسكانر لهذه الحصة...
                     </p>
                     <p className="text-xs text-slate-500 font-tajawal">
-                      مرر كارت الطالب أمام السكانر، أو استخدم "بحث يدوي ذكي" أو "حضور طالب من يوم آخر (تعويض)". وبمجرد الانتهاء اضغط على "حفظ وإرسال الغياب للكل" لترحيل البيانات لتقرير الحضور وتفريغ الشاشة للحصة التالية.
+                      مرر كارت الطالب أمام السكانر، أو استخدم "تسجيل يدوي" أو "حضور طالب من يوم آخر (تعويض)". وبمجرد الانتهاء اضغط على "حفظ وإرسال الغياب للكل" لترحيل البيانات لتقرير الحضور وتفريغ الشاشة للحصة التالية.
                     </p>
                   </td>
                 </tr>
@@ -2080,6 +2362,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                       statusToday={statusToday}
                       formattedTime={formattedTime}
                       isCrossDayMakeup={isCrossDayMakeup}
+                      source={scanSources[barcode] || "scanner"}
                       onSendWhatsApp={handleSendWhatsApp}
                       onRemoveFromScanner={onRemoveFromScanner ? handleRemoveFromQueue : undefined}
                     />
