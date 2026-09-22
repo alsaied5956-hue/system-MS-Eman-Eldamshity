@@ -1299,34 +1299,48 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
     const attendanceHistory: Record<string, Record<string, string>> = {};
     const studentAttendanceCounts = new Map<string, { present: number; absent: number }>();
 
-    // Fetch all attendance logs to construct complete history
-    const { data: allLogs, error: logErr } = await supabase
-      .from("attendance_logs")
-      .select("barcode, date_key, status");
+    // Fetch all attendance logs using pagination to construct complete, authentic history
+    const allLogs: { barcode: string; date_key: string; status: string }[] = [];
+    let logFrom = 0;
+    const step = 1000;
+    while (true) {
+      const { data: chunk, error: logErr } = await supabase
+        .from("attendance_logs")
+        .select("barcode, date_key, status")
+        .order("created_at", { ascending: false })
+        .range(logFrom, logFrom + step - 1);
 
-    if (!logErr && Array.isArray(allLogs)) {
-      allLogs.forEach((l) => {
-        if (l.barcode && l.date_key) {
-          const b = String(l.barcode).trim();
-          if (!attendanceHistory[l.date_key]) {
-            attendanceHistory[l.date_key] = {};
-          }
-          attendanceHistory[l.date_key][b] = l.status;
-
-          if (l.date_key === todayKey) {
-            attendanceToday[b] = l.status;
-          }
-
-          const counts = studentAttendanceCounts.get(b) || { present: 0, absent: 0 };
-          if (l.status === "حضور" || l.status === "تأخير") {
-            counts.present += 1;
-          } else if (l.status === "غياب") {
-            counts.absent += 1;
-          }
-          studentAttendanceCounts.set(b, counts);
-        }
-      });
+      if (logErr || !chunk || chunk.length === 0) break;
+      allLogs.push(...chunk);
+      if (chunk.length < step) break;
+      logFrom += step;
+      if (allLogs.length >= 40000) break;
     }
+
+    allLogs.forEach((l) => {
+      if (l.barcode && l.date_key) {
+        const b = String(l.barcode).trim();
+        // Discard any impossible future date
+        if (l.date_key > todayKey) return;
+
+        if (!attendanceHistory[l.date_key]) {
+          attendanceHistory[l.date_key] = {};
+        }
+        attendanceHistory[l.date_key][b] = l.status;
+
+        if (l.date_key === todayKey) {
+          attendanceToday[b] = l.status;
+        }
+
+        const counts = studentAttendanceCounts.get(b) || { present: 0, absent: 0 };
+        if (l.status === "حضور" || l.status === "تأخير") {
+          counts.present += 1;
+        } else if (l.status === "غياب" || l.status === "غائب") {
+          counts.absent += 1;
+        }
+        studentAttendanceCounts.set(b, counts);
+      }
+    });
 
     // Fetch homework/exams to populate student test scores
     const studentExamScores = new Map<string, { scores: number[]; lastTitle?: string; lastScore?: string }>();

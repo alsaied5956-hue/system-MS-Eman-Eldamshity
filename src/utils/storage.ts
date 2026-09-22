@@ -528,11 +528,26 @@ export function loadLocalData(): SystemData {
       }
     }
 
-    // Strict Date Isolation: attendanceToday MUST belong to todayKey.
+    // Strict Date Isolation:
+    // If local storage has an old attendanceTodayDate, archive it to its respective date
+    if (parsed.attendanceTodayDate && parsed.attendanceTodayDate !== todayKey) {
+      if (!filteredHistory[parsed.attendanceTodayDate] && parsed.attendanceToday) {
+        filteredHistory[parsed.attendanceTodayDate] = parsed.attendanceToday;
+      }
+    }
+
+    // Eliminate any accidental future dates from history
+    for (const dKey of Object.keys(filteredHistory)) {
+      if (dKey > todayKey) {
+        delete filteredHistory[dKey];
+      }
+    }
+
+    // attendanceToday MUST strictly belong to todayKey.
     // Never fallback to obsolete yesterday's attendanceToday if today is a new day!
-    const isTodayRecordValid = parsed.attendanceTodayDate === todayKey || Boolean(parsed.attendanceHistory?.[todayKey]);
+    const isTodayRecordValid = parsed.attendanceTodayDate === todayKey;
     const rawToday: Record<string, string> =
-      parsed.attendanceHistory?.[todayKey] || (isTodayRecordValid ? parsed.attendanceToday : {}) || {};
+      isTodayRecordValid ? (filteredHistory[todayKey] || parsed.attendanceToday || {}) : (filteredHistory[todayKey] || {});
     const filteredToday: Record<string, string> = {};
     for (const [bCode, status] of Object.entries(rawToday)) {
       const cleanB = String(bCode).trim();
@@ -1188,7 +1203,23 @@ export async function flushPendingSyncToCloud(forceManual: boolean = false): Pro
   const localData = loadLocalData();
   const todayKey = getTodayKey();
   if (!localData.attendanceHistory) localData.attendanceHistory = {};
-  localData.attendanceHistory[todayKey] = localData.attendanceToday || {};
+
+  // Strict Date Isolation: Only save attendanceToday to attendanceHistory[todayKey] if it actually belongs to today
+  if (localData.attendanceTodayDate === todayKey) {
+    localData.attendanceHistory[todayKey] = localData.attendanceToday || {};
+  } else if (localData.attendanceTodayDate && localData.attendanceTodayDate < todayKey) {
+    // Archive to its original historical day
+    if (!localData.attendanceHistory[localData.attendanceTodayDate]) {
+      localData.attendanceHistory[localData.attendanceTodayDate] = localData.attendanceToday || {};
+    }
+  }
+
+  // Remove any future dates from cloud sync
+  for (const dKey of Object.keys(localData.attendanceHistory)) {
+    if (dKey > todayKey) {
+      delete localData.attendanceHistory[dKey];
+    }
+  }
 
   isCurrentlySyncing = true;
   syncLockAcquiredAt = Date.now();

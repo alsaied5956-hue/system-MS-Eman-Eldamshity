@@ -1,9 +1,22 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo } from "react";
 import { Student, GradeName, GroupDays, GRADE_ORDER } from "../types";
 import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName, getDefaultGroupDaysForDate } from "../utils/helpers";
 import { matchStudentSearch } from "../utils/search";
 import { exportAttendanceHistoryToExcel } from "../utils/excel";
-import { Calendar, Filter, FileSpreadsheet, FileText, CheckCircle2, AlertTriangle, XCircle, Edit3, Search, X } from "lucide-react";
+import {
+  Calendar,
+  FileSpreadsheet,
+  FileText,
+  Edit3,
+  Search,
+  X,
+  AlertCircle,
+  Clock,
+  CheckCircle2,
+  XCircle,
+  HelpCircle,
+  Users,
+} from "lucide-react";
 
 interface DailyAttendanceReportProps {
   students: Student[];
@@ -12,13 +25,16 @@ interface DailyAttendanceReportProps {
   onOpenPdfModal: (type: "attendance") => void;
 }
 
+type StatusFilterType = "ALL" | "حضور" | "تأخير" | "غياب" | "لم يسجل";
+
 export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   students,
   attendanceHistory,
   onUpdateStatus,
   onOpenPdfModal,
 }) => {
-  const [selectedDate, setSelectedDate] = useState<string>(getTodayKey());
+  const todayKey = getTodayKey();
+  const [selectedDate, setSelectedDate] = useState<string>(todayKey);
   const [filterGrade, setFilterGrade] = useState<string>("ALL");
   const [filterDays, setFilterDays] = useState<string>(() => {
     try {
@@ -28,8 +44,11 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
     }
   });
   const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilterType>("ALL");
 
-  // Automatically sync day-group filter when user changes date, if not manually set to ALL
+  const isFutureDate = selectedDate > todayKey;
+
+  // Automatically sync day-group filter when user changes date
   const handleDateChange = (newDate: string) => {
     setSelectedDate(newDate);
     try {
@@ -48,14 +67,17 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   const [editingStudent, setEditingStudent] = useState<{ barcode: string; name: string; currentStatus: string } | null>(null);
   const [newStatusSelect, setNewStatusSelect] = useState("حضور");
 
-  const dateAttendanceMap = attendanceHistory[selectedDate] || {};
+  const dateAttendanceMap = useMemo(() => {
+    return attendanceHistory[selectedDate] || {};
+  }, [attendanceHistory, selectedDate]);
 
-  const filteredStudents = useMemo(() => {
+  // Base list of students matching grade and group days
+  const baseStudents = useMemo(() => {
     const base = students.filter((s) => {
       if (filterGrade !== "ALL" && s.groupGrade !== filterGrade) return false;
       if (filterDays !== "ALL") {
         if (s.groupDays === filterDays) return true;
-        // Strict Isolation with Compensation: Include other-group students ONLY if they actually attended on this specific date
+        // Include other-group students ONLY if they actually attended on this specific date (compensation session)
         const st = dateAttendanceMap[s.barcode];
         if (st === "حضور" || st === "تأخير") {
           return true;
@@ -80,20 +102,50 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
     return sortStudentsByGradeAndName(base);
   }, [students, filterGrade, filterDays, searchQuery, dateAttendanceMap]);
 
-  const { presentCount, lateCount, absentCount } = useMemo(() => {
+  // Comprehensive metric calculation with zero leakage
+  const { presentCount, lateCount, absentCount, unrecordedCount, totalCount } = useMemo(() => {
     let present = 0;
     let late = 0;
     let absent = 0;
 
-    filteredStudents.forEach((s) => {
+    baseStudents.forEach((s) => {
       const st = dateAttendanceMap[s.barcode];
       if (st === "حضور") present++;
       else if (st === "تأخير") late++;
-      else if (st === "غائب") absent++;
+      else if (st === "غياب" || st === "غائب") absent++;
     });
 
-    return { presentCount: present, lateCount: late, absentCount: absent };
-  }, [filteredStudents, dateAttendanceMap]);
+    const total = baseStudents.length;
+    const unrecorded = Math.max(0, total - (present + late + absent));
+
+    return {
+      totalCount: total,
+      presentCount: present,
+      lateCount: late,
+      absentCount: absent,
+      unrecordedCount: unrecorded,
+    };
+  }, [baseStudents, dateAttendanceMap]);
+
+  // Calculate percentages cleanly
+  const presentPercent = totalCount > 0 ? Math.round((presentCount / totalCount) * 100) : 0;
+  const latePercent = totalCount > 0 ? Math.round((lateCount / totalCount) * 100) : 0;
+  const absentPercent = totalCount > 0 ? Math.round((absentCount / totalCount) * 100) : 0;
+  const unrecordedPercent = totalCount > 0 ? Math.round((unrecordedCount / totalCount) * 100) : 0;
+
+  // Filter students by selected status (if user clicked quick-filter)
+  const displayedStudents = useMemo(() => {
+    if (statusFilter === "ALL") return baseStudents;
+
+    return baseStudents.filter((s) => {
+      const raw = dateAttendanceMap[s.barcode];
+      if (statusFilter === "حضور") return raw === "حضور";
+      if (statusFilter === "تأخير") return raw === "تأخير";
+      if (statusFilter === "غياب") return raw === "غياب" || raw === "غائب";
+      if (statusFilter === "لم يسجل") return !raw;
+      return true;
+    });
+  }, [baseStudents, dateAttendanceMap, statusFilter]);
 
   const handleSaveStatus = (e: React.FormEvent) => {
     e.preventDefault();
@@ -104,23 +156,96 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Stat Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-        <div className="glass-card p-4 rounded-3xl text-center shadow-lg hover:border-amber-400/40 transition-all duration-300">
-          <p className="text-xs text-slate-400 font-tajawal font-medium mb-1">الطلاب المحددين</p>
-          <p className="text-2xl md:text-3xl font-black text-amber-300 font-mono">{filteredStudents.length}</p>
+      {/* Future Date Notification Banner */}
+      {isFutureDate && (
+        <div className="bg-sky-950/40 border border-sky-500/40 p-4 rounded-3xl flex items-start sm:items-center gap-3.5 text-sky-200 shadow-lg">
+          <AlertCircle className="w-5 h-5 text-sky-400 shrink-0 mt-0.5 sm:mt-0" />
+          <div className="flex-1 font-tajawal text-xs md:text-sm">
+            <p className="font-extrabold text-sky-300">
+              📅 تاريخ مستقبلي ({selectedDate}) — الجلسة لم تبدأ بعد
+            </p>
+            <p className="text-slate-400 text-xs mt-0.5">
+              أنت تشاهد حالياً قائمة الطلاب المقيدين في مجموعة هذا اليوم ({filterDays}). لم يتم رصد حضور فعلي بعد وسيتم التحديث التلقائي فور بدء المسح بالسكانر.
+            </p>
+          </div>
         </div>
-        <div className="glass-card p-4 rounded-3xl text-center shadow-lg hover:border-emerald-400/40 transition-all duration-300">
-          <p className="text-xs text-emerald-400 font-tajawal font-medium mb-1">🟢 حضور تام</p>
+      )}
+
+      {/* Balanced Stat Cards (Total = Present + Late + Absent + Unrecorded) */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        {/* Card 1: Total Selected */}
+        <div
+          onClick={() => setStatusFilter("ALL")}
+          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+            statusFilter === "ALL" ? "border-amber-400 ring-2 ring-amber-400/30" : "hover:border-amber-400/40"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1.5 text-slate-400 font-tajawal text-xs font-medium mb-1">
+            <Users className="w-3.5 h-3.5 text-amber-400" />
+            <span>الطلاب المحددين</span>
+          </div>
+          <p className="text-2xl md:text-3xl font-black text-amber-300 font-mono">{totalCount}</p>
+          <span className="text-[10px] text-amber-300/70 font-bold font-mono">100% المجموعة</span>
+        </div>
+
+        {/* Card 2: Present */}
+        <div
+          onClick={() => setStatusFilter("حضور")}
+          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+            statusFilter === "حضور" ? "border-emerald-400 ring-2 ring-emerald-400/30" : "hover:border-emerald-400/40"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1.5 text-emerald-400 font-tajawal text-xs font-medium mb-1">
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            <span>🟢 حضور تام</span>
+          </div>
           <p className="text-2xl md:text-3xl font-black text-emerald-400 font-mono">{presentCount}</p>
+          <span className="text-[10px] text-emerald-400/80 font-bold font-mono">{presentPercent}% من الإجمالي</span>
         </div>
-        <div className="glass-card p-4 rounded-3xl text-center shadow-lg hover:border-amber-400/40 transition-all duration-300">
-          <p className="text-xs text-amber-400 font-tajawal font-medium mb-1">🟡 تأخير</p>
+
+        {/* Card 3: Late */}
+        <div
+          onClick={() => setStatusFilter("تأخير")}
+          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+            statusFilter === "تأخير" ? "border-amber-400 ring-2 ring-amber-400/30" : "hover:border-amber-400/40"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1.5 text-amber-400 font-tajawal text-xs font-medium mb-1">
+            <Clock className="w-3.5 h-3.5 text-amber-400" />
+            <span>🟡 تأخير</span>
+          </div>
           <p className="text-2xl md:text-3xl font-black text-amber-400 font-mono">{lateCount}</p>
+          <span className="text-[10px] text-amber-400/80 font-bold font-mono">{latePercent}% من الإجمالي</span>
         </div>
-        <div className="glass-card p-4 rounded-3xl text-center shadow-lg hover:border-rose-400/40 transition-all duration-300">
-          <p className="text-xs text-rose-400 font-tajawal font-medium mb-1">🔴 غائب</p>
+
+        {/* Card 4: Absent */}
+        <div
+          onClick={() => setStatusFilter("غياب")}
+          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+            statusFilter === "غياب" ? "border-rose-400 ring-2 ring-rose-400/30" : "hover:border-rose-400/40"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1.5 text-rose-400 font-tajawal text-xs font-medium mb-1">
+            <XCircle className="w-3.5 h-3.5 text-rose-400" />
+            <span>🔴 غياب</span>
+          </div>
           <p className="text-2xl md:text-3xl font-black text-rose-400 font-mono">{absentCount}</p>
+          <span className="text-[10px] text-rose-400/80 font-bold font-mono">{absentPercent}% من الإجمالي</span>
+        </div>
+
+        {/* Card 5: Unrecorded / Pending */}
+        <div
+          onClick={() => setStatusFilter("لم يسجل")}
+          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 col-span-2 sm:col-span-1 ${
+            statusFilter === "لم يسجل" ? "border-slate-400 ring-2 ring-slate-400/30" : "hover:border-slate-500/40"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1.5 text-slate-400 font-tajawal text-xs font-medium mb-1">
+            <HelpCircle className="w-3.5 h-3.5 text-slate-400" />
+            <span>⚪ لم يُسجل بعد</span>
+          </div>
+          <p className="text-2xl md:text-3xl font-black text-slate-300 font-mono">{unrecordedCount}</p>
+          <span className="text-[10px] text-slate-400 font-bold font-mono">{unrecordedPercent}% بانتظار الرصد</span>
         </div>
       </div>
 
@@ -170,7 +295,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="بحث بالاسم (مثال: أحمد علي) أو الباركود..."
+              placeholder="بحث بالاسم أو الباركود..."
               className="w-full bg-[#080d1e] border border-indigo-500/30 text-slate-100 text-xs pr-9 pl-8 py-2.5 rounded-2xl outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400/30 transition-all placeholder:text-slate-500 font-medium"
             />
             {searchQuery && (
@@ -188,7 +313,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
         {/* Export Buttons */}
         <div className="flex items-center gap-2 font-tajawal">
           <button
-            onClick={() => exportAttendanceHistoryToExcel(filteredStudents, dateAttendanceMap, selectedDate)}
+            onClick={() => exportAttendanceHistoryToExcel(displayedStudents, dateAttendanceMap, selectedDate)}
             className="px-3.5 py-2.5 rounded-2xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
@@ -203,6 +328,61 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
             <span>📄 تصدير PDF مقسم لكل صف</span>
           </button>
         </div>
+      </div>
+
+      {/* Quick Status Filter Tabs */}
+      <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs font-tajawal font-bold">
+        <span className="text-slate-400 ml-1">عرض:</span>
+        <button
+          onClick={() => setStatusFilter("ALL")}
+          className={`px-3 py-1.5 rounded-xl border transition-all ${
+            statusFilter === "ALL"
+              ? "bg-amber-400/20 text-amber-300 border-amber-400/50"
+              : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
+          }`}
+        >
+          الكل ({totalCount})
+        </button>
+        <button
+          onClick={() => setStatusFilter("حضور")}
+          className={`px-3 py-1.5 rounded-xl border transition-all ${
+            statusFilter === "حضور"
+              ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/50"
+              : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
+          }`}
+        >
+          🟢 حضور ({presentCount})
+        </button>
+        <button
+          onClick={() => setStatusFilter("تأخير")}
+          className={`px-3 py-1.5 rounded-xl border transition-all ${
+            statusFilter === "تأخير"
+              ? "bg-amber-500/20 text-amber-300 border-amber-500/50"
+              : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
+          }`}
+        >
+          🟡 تأخير ({lateCount})
+        </button>
+        <button
+          onClick={() => setStatusFilter("غياب")}
+          className={`px-3 py-1.5 rounded-xl border transition-all ${
+            statusFilter === "غياب"
+              ? "bg-rose-500/20 text-rose-300 border-rose-500/50"
+              : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
+          }`}
+        >
+          🔴 غياب ({absentCount})
+        </button>
+        <button
+          onClick={() => setStatusFilter("لم يسجل")}
+          className={`px-3 py-1.5 rounded-xl border transition-all ${
+            statusFilter === "لم يسجل"
+              ? "bg-slate-700/50 text-slate-200 border-slate-500/50"
+              : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
+          }`}
+        >
+          ⚪ لم يسجل ({unrecordedCount})
+        </button>
       </div>
 
       {/* Attendance Table */}
@@ -222,19 +402,26 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-indigo-950/50">
-              {filteredStudents.length === 0 ? (
+              {displayedStudents.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="p-8 text-center text-slate-400 italic">
-                    {searchQuery ? `لا يوجد نتائج مطابقة للبحث "${searchQuery}"` : "لا يوجد طلاب مطابقين للتصفية المحددة."}
+                    {searchQuery
+                      ? `لا يوجد نتائج مطابقة للبحث "${searchQuery}"`
+                      : "لا يوجد طلاب مطابقين للتصفية المحددة."}
                   </td>
                 </tr>
               ) : (
-                filteredStudents.map((student, idx) => {
-                  const status = dateAttendanceMap[student.barcode] || "لم يسجل";
+                displayedStudents.map((student, idx) => {
+                  const rawStatus = dateAttendanceMap[student.barcode];
+                  const status =
+                    rawStatus === "غائب" || rawStatus === "غياب"
+                      ? "غياب"
+                      : rawStatus || "لم يسجل";
+
                   let statusBg = "bg-slate-800 text-slate-400 border-slate-700";
                   if (status === "حضور") statusBg = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
                   else if (status === "تأخير") statusBg = "bg-amber-500/20 text-amber-300 border-amber-500/40";
-                  else if (status === "غائب") statusBg = "bg-rose-500/20 text-rose-300 border-rose-500/40";
+                  else if (status === "غياب") statusBg = "bg-rose-500/20 text-rose-300 border-rose-500/40";
 
                   return (
                     <tr key={student.barcode} className="hover:bg-indigo-500/10 transition-colors font-medium">
@@ -300,7 +487,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
       {/* Edit Status Modal */}
       {editingStudent && (
         <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
-          <div className="bg-[#121926] border border-amber-500/40 p-6 rounded-2xl max-w-md w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
+          <div className="bg-[#121926] border border-amber-500/40 p-6 rounded-2xl max-w-md w-full shadow-2xl space-y-4 animate-in fade-in zoom-in-95 font-tajawal">
             <h3 className="text-base font-extrabold text-amber-400 border-b border-amber-500/20 pb-2">
               🔄 تعديل حالة حضور الطالب
             </h3>
@@ -323,7 +510,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                 >
                   <option value="حضور">🟢 حضور (في الموعد)</option>
                   <option value="تأخير">🟡 تأخير</option>
-                  <option value="غائب">🔴 غائب</option>
+                  <option value="غياب">🔴 غياب</option>
                   <option value="إذن">⚪ إذن مسبق / عذر</option>
                 </select>
               </div>

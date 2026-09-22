@@ -285,7 +285,13 @@ export default function App() {
         }
 
         if (res.attendanceHistory && Object.keys(res.attendanceHistory).length > 0) {
-          setAttendanceHistory((prev) => ({ ...prev, ...res.attendanceHistory }));
+          const today = getTodayKey();
+          const cleanHistory = { ...res.attendanceHistory };
+          for (const d of Object.keys(cleanHistory)) {
+            if (d > today) delete cleanHistory[d];
+          }
+          setAttendanceHistory(cleanHistory);
+          attendanceHistoryRef.current = cleanHistory;
         }
 
         if (res.groupPrices && Object.keys(res.groupPrices).length > 0) {
@@ -1534,14 +1540,14 @@ export default function App() {
           // Undo previous status count
           if (prevStatus === "حضور" || prevStatus === "تأخير") {
             attCount = Math.max(0, attCount - 1);
-          } else if (prevStatus === "غائب") {
+          } else if (prevStatus === "غائب" || prevStatus === "غياب") {
             absCount = Math.max(0, absCount - 1);
           }
 
           // Apply new status count
           if (newStatus === "حضور" || newStatus === "تأخير") {
             attCount += 1;
-          } else if (newStatus === "غائب") {
+          } else if (newStatus === "غائب" || newStatus === "غياب") {
             absCount += 1;
           }
 
