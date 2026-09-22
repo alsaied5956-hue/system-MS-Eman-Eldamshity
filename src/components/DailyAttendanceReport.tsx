@@ -22,10 +22,10 @@ interface DailyAttendanceReportProps {
   students: Student[];
   attendanceHistory: Record<string, Record<string, string>>;
   onUpdateStatus: (barcode: string, dateKey: string, newStatus: string) => void;
-  onOpenPdfModal: (type: "attendance") => void;
+  onOpenPdfModal: (type: "attendance", targetDate?: string, targetAttendanceMap?: Record<string, string>) => void;
 }
 
-type StatusFilterType = "ALL" | "حضور" | "تأخير" | "غياب" | "لم يسجل";
+type StatusFilterType = "ALL" | "حضور" | "تأخير" | "غياب" | "إذن" | "لم يسجل";
 
 export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   students,
@@ -103,26 +103,29 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   }, [students, filterGrade, filterDays, searchQuery, dateAttendanceMap]);
 
   // Comprehensive metric calculation with zero leakage
-  const { presentCount, lateCount, absentCount, unrecordedCount, totalCount } = useMemo(() => {
+  const { presentCount, lateCount, absentCount, excusedCount, unrecordedCount, totalCount } = useMemo(() => {
     let present = 0;
     let late = 0;
     let absent = 0;
+    let excused = 0;
 
     baseStudents.forEach((s) => {
       const st = dateAttendanceMap[s.barcode];
       if (st === "حضور") present++;
       else if (st === "تأخير") late++;
       else if (st === "غياب" || st === "غائب") absent++;
+      else if (st === "إذن") excused++;
     });
 
     const total = baseStudents.length;
-    const unrecorded = Math.max(0, total - (present + late + absent));
+    const unrecorded = Math.max(0, total - (present + late + absent + excused));
 
     return {
       totalCount: total,
       presentCount: present,
       lateCount: late,
       absentCount: absent,
+      excusedCount: excused,
       unrecordedCount: unrecorded,
     };
   }, [baseStudents, dateAttendanceMap]);
@@ -131,6 +134,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   const presentPercent = totalCount > 0 ? Math.round((presentCount / totalCount) * 100) : 0;
   const latePercent = totalCount > 0 ? Math.round((lateCount / totalCount) * 100) : 0;
   const absentPercent = totalCount > 0 ? Math.round((absentCount / totalCount) * 100) : 0;
+  const excusedPercent = totalCount > 0 ? Math.round((excusedCount / totalCount) * 100) : 0;
   const unrecordedPercent = totalCount > 0 ? Math.round((unrecordedCount / totalCount) * 100) : 0;
 
   // Filter students by selected status (if user clicked quick-filter)
@@ -142,6 +146,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
       if (statusFilter === "حضور") return raw === "حضور";
       if (statusFilter === "تأخير") return raw === "تأخير";
       if (statusFilter === "غياب") return raw === "غياب" || raw === "غائب";
+      if (statusFilter === "إذن") return raw === "إذن";
       if (statusFilter === "لم يسجل") return !raw;
       return true;
     });
@@ -171,42 +176,42 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
         </div>
       )}
 
-      {/* Balanced Stat Cards (Total = Present + Late + Absent + Unrecorded) */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      {/* Balanced Stat Cards (Total = Present + Late + Absent + Excused + Unrecorded) */}
+      <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
         {/* Card 1: Total Selected */}
         <div
           onClick={() => setStatusFilter("ALL")}
-          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+          className={`glass-card p-3.5 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
             statusFilter === "ALL" ? "border-amber-400 ring-2 ring-amber-400/30" : "hover:border-amber-400/40"
           }`}
         >
           <div className="flex items-center justify-center gap-1.5 text-slate-400 font-tajawal text-xs font-medium mb-1">
             <Users className="w-3.5 h-3.5 text-amber-400" />
-            <span>الطلاب المحددين</span>
+            <span>الطلاب</span>
           </div>
-          <p className="text-2xl md:text-3xl font-black text-amber-300 font-mono">{totalCount}</p>
+          <p className="text-2xl font-black text-amber-300 font-mono">{totalCount}</p>
           <span className="text-[10px] text-amber-300/70 font-bold font-mono">100% المجموعة</span>
         </div>
 
         {/* Card 2: Present */}
         <div
           onClick={() => setStatusFilter("حضور")}
-          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+          className={`glass-card p-3.5 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
             statusFilter === "حضور" ? "border-emerald-400 ring-2 ring-emerald-400/30" : "hover:border-emerald-400/40"
           }`}
         >
           <div className="flex items-center justify-center gap-1.5 text-emerald-400 font-tajawal text-xs font-medium mb-1">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-            <span>🟢 حضور تام</span>
+            <span>🟢 حضور</span>
           </div>
-          <p className="text-2xl md:text-3xl font-black text-emerald-400 font-mono">{presentCount}</p>
-          <span className="text-[10px] text-emerald-400/80 font-bold font-mono">{presentPercent}% من الإجمالي</span>
+          <p className="text-2xl font-black text-emerald-400 font-mono">{presentCount}</p>
+          <span className="text-[10px] text-emerald-400/80 font-bold font-mono">{presentPercent}%</span>
         </div>
 
         {/* Card 3: Late */}
         <div
           onClick={() => setStatusFilter("تأخير")}
-          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+          className={`glass-card p-3.5 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
             statusFilter === "تأخير" ? "border-amber-400 ring-2 ring-amber-400/30" : "hover:border-amber-400/40"
           }`}
         >
@@ -214,14 +219,14 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
             <Clock className="w-3.5 h-3.5 text-amber-400" />
             <span>🟡 تأخير</span>
           </div>
-          <p className="text-2xl md:text-3xl font-black text-amber-400 font-mono">{lateCount}</p>
-          <span className="text-[10px] text-amber-400/80 font-bold font-mono">{latePercent}% من الإجمالي</span>
+          <p className="text-2xl font-black text-amber-400 font-mono">{lateCount}</p>
+          <span className="text-[10px] text-amber-400/80 font-bold font-mono">{latePercent}%</span>
         </div>
 
         {/* Card 4: Absent */}
         <div
           onClick={() => setStatusFilter("غياب")}
-          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+          className={`glass-card p-3.5 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
             statusFilter === "غياب" ? "border-rose-400 ring-2 ring-rose-400/30" : "hover:border-rose-400/40"
           }`}
         >
@@ -229,23 +234,38 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
             <XCircle className="w-3.5 h-3.5 text-rose-400" />
             <span>🔴 غياب</span>
           </div>
-          <p className="text-2xl md:text-3xl font-black text-rose-400 font-mono">{absentCount}</p>
-          <span className="text-[10px] text-rose-400/80 font-bold font-mono">{absentPercent}% من الإجمالي</span>
+          <p className="text-2xl font-black text-rose-400 font-mono">{absentCount}</p>
+          <span className="text-[10px] text-rose-400/80 font-bold font-mono">{absentPercent}%</span>
         </div>
 
-        {/* Card 5: Unrecorded / Pending */}
+        {/* Card 5: Excused */}
+        <div
+          onClick={() => setStatusFilter("إذن")}
+          className={`glass-card p-3.5 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
+            statusFilter === "إذن" ? "border-sky-400 ring-2 ring-sky-400/30" : "hover:border-sky-400/40"
+          }`}
+        >
+          <div className="flex items-center justify-center gap-1.5 text-sky-400 font-tajawal text-xs font-medium mb-1">
+            <Clock className="w-3.5 h-3.5 text-sky-400" />
+            <span>⚪ إذن/عذر</span>
+          </div>
+          <p className="text-2xl font-black text-sky-400 font-mono">{excusedCount}</p>
+          <span className="text-[10px] text-sky-400/80 font-bold font-mono">{excusedPercent}%</span>
+        </div>
+
+        {/* Card 6: Unrecorded / Pending */}
         <div
           onClick={() => setStatusFilter("لم يسجل")}
-          className={`glass-card p-4 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 col-span-2 sm:col-span-1 ${
+          className={`glass-card p-3.5 rounded-3xl text-center shadow-lg cursor-pointer transition-all duration-300 ${
             statusFilter === "لم يسجل" ? "border-slate-400 ring-2 ring-slate-400/30" : "hover:border-slate-500/40"
           }`}
         >
           <div className="flex items-center justify-center gap-1.5 text-slate-400 font-tajawal text-xs font-medium mb-1">
             <HelpCircle className="w-3.5 h-3.5 text-slate-400" />
-            <span>⚪ لم يُسجل بعد</span>
+            <span>بانتظار الرصد</span>
           </div>
-          <p className="text-2xl md:text-3xl font-black text-slate-300 font-mono">{unrecordedCount}</p>
-          <span className="text-[10px] text-slate-400 font-bold font-mono">{unrecordedPercent}% بانتظار الرصد</span>
+          <p className="text-2xl font-black text-slate-300 font-mono">{unrecordedCount}</p>
+          <span className="text-[10px] text-slate-400 font-bold font-mono">{unrecordedPercent}%</span>
         </div>
       </div>
 
@@ -321,11 +341,11 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
           </button>
 
           <button
-            onClick={() => onOpenPdfModal("attendance")}
+            onClick={() => onOpenPdfModal("attendance", selectedDate, dateAttendanceMap)}
             className="px-4 py-2.5 rounded-2xl bg-gradient-to-r from-amber-400 via-amber-300 to-yellow-200 hover:from-amber-300 hover:to-yellow-100 text-slate-950 text-xs font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-amber-500/20 cursor-pointer"
           >
             <FileText className="w-4 h-4" />
-            <span>📄 تصدير PDF مقسم لكل صف</span>
+            <span>📄 تصدير PDF مقسم لكل صف ({selectedDate})</span>
           </button>
         </div>
       </div>
@@ -374,6 +394,16 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
           🔴 غياب ({absentCount})
         </button>
         <button
+          onClick={() => setStatusFilter("إذن")}
+          className={`px-3 py-1.5 rounded-xl border transition-all ${
+            statusFilter === "إذن"
+              ? "bg-sky-500/20 text-sky-300 border-sky-500/50"
+              : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
+          }`}
+        >
+          ⚪ إذن ({excusedCount})
+        </button>
+        <button
           onClick={() => setStatusFilter("لم يسجل")}
           className={`px-3 py-1.5 rounded-xl border transition-all ${
             statusFilter === "لم يسجل"
@@ -381,7 +411,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
               : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
           }`}
         >
-          ⚪ لم يسجل ({unrecordedCount})
+          بانتظار الرصد ({unrecordedCount})
         </button>
       </div>
 
@@ -422,6 +452,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                   if (status === "حضور") statusBg = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
                   else if (status === "تأخير") statusBg = "bg-amber-500/20 text-amber-300 border-amber-500/40";
                   else if (status === "غياب") statusBg = "bg-rose-500/20 text-rose-300 border-rose-500/40";
+                  else if (status === "إذن") statusBg = "bg-sky-500/20 text-sky-300 border-sky-500/40";
 
                   return (
                     <tr key={student.barcode} className="hover:bg-indigo-500/10 transition-colors font-medium">

@@ -227,6 +227,8 @@ export default function App() {
   const [printModal, setPrintModal] = useState<{
     open: boolean;
     type: "attendance" | "exams" | "all" | "unpaid";
+    targetDate?: string;
+    targetAttendanceMap?: Record<string, string>;
   }>({
     open: false,
     type: "all",
@@ -2135,7 +2137,9 @@ export default function App() {
                   students={students}
                   attendanceHistory={attendanceHistory}
                   onUpdateStatus={handleChangeAttendanceStatus}
-                  onOpenPdfModal={(type) => setPrintModal({ open: true, type })}
+                  onOpenPdfModal={(type, targetDate, targetAttendanceMap) =>
+                    setPrintModal({ open: true, type, targetDate, targetAttendanceMap })
+                  }
                 />
               )}
 
@@ -2262,9 +2266,10 @@ export default function App() {
         <PrintPDFModal
           type={printModal.type}
           students={students}
-          attendanceToday={attendanceToday}
+          attendanceToday={printModal.targetAttendanceMap || attendanceToday}
           payments={payments}
           groupPrices={groupPrices}
+          targetDate={printModal.targetDate}
           onClose={() => setPrintModal({ ...printModal, open: false })}
         />
       )}

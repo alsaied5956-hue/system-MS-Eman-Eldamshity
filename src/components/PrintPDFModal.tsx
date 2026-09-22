@@ -21,6 +21,7 @@ interface PrintPDFModalProps {
   attendanceToday: Record<string, string>;
   payments?: Record<string, Record<string, PaymentRecord>>;
   groupPrices?: Record<GradeName, number>;
+  targetDate?: string;
   onClose: () => void;
 }
 
@@ -30,6 +31,7 @@ export const PrintPDFModal: React.FC<PrintPDFModalProps> = ({
   attendanceToday,
   payments = {},
   groupPrices = DEFAULT_GRADE_PRICES,
+  targetDate,
   onClose,
 }) => {
   const [activeReportType, setActiveReportType] = useState<"attendance" | "exams" | "unpaid">(
@@ -39,7 +41,8 @@ export const PrintPDFModal: React.FC<PrintPDFModalProps> = ({
   const [selectedGroupDays, setSelectedGroupDays] = useState<"ALL" | GroupDays>("ALL");
 
   const todayKey = getTodayKey();
-  const formattedDate = formatArabicDate(todayKey);
+  const effectiveDate = targetDate || todayKey;
+  const formattedDate = formatArabicDate(effectiveDate);
 
   const monthPayments = payments[selectedMonth] || {};
 
@@ -54,9 +57,9 @@ export const PrintPDFModal: React.FC<PrintPDFModalProps> = ({
 
   const reportTitle =
     activeReportType === "attendance"
-      ? `كشف_حضور_وغياب_${todayKey}`
+      ? `كشف_حضور_وغياب_${effectiveDate}`
       : activeReportType === "exams"
-      ? `سجل_الدرجات_التراكمي_${todayKey}`
+      ? `سجل_الدرجات_التراكمي_${effectiveDate}`
       : `كشف_الطلاب_الذين_لم_يدفعوا_شهر_${selectedMonth}`;
 
   const handlePrint = () => {
@@ -158,6 +161,10 @@ export const PrintPDFModal: React.FC<PrintPDFModalProps> = ({
                             ? "text-emerald-700"
                             : status === "تأخير"
                             ? "text-amber-700"
+                            : status === "إذن"
+                            ? "text-sky-700"
+                            : status === "لم يسجل"
+                            ? "text-slate-500"
                             : "text-rose-700"
                         }
                       >
