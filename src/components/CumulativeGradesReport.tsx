@@ -1,11 +1,12 @@
 import React, { useState, useMemo } from "react";
-import { Student, GradeName, GRADE_ORDER } from "../types";
+import { Student, StudentExamRecord, GradeName, GRADE_ORDER } from "../types";
 import { getAttendanceRate, getAbsenceRate, getExamAverage, sortStudentsByGradeAndName, openWhatsApp } from "../utils/helpers";
 import { matchStudentSearch } from "../utils/search";
 import { exportAllExamsToExcel } from "../utils/excel";
 import { enqueuePlatformMessage } from "../utils/storage";
 import { EditGradeModal } from "./EditGradeModal";
-import { Award, FileSpreadsheet, FileText, Search, Edit3, Star, X, CheckCircle2 } from "lucide-react";
+import { StudentExamsHistoryModal } from "./StudentExamsHistoryModal";
+import { Award, FileSpreadsheet, FileText, Search, Edit3, Star, X, CheckCircle2, BookOpen, ExternalLink } from "lucide-react";
 
 interface CumulativeGradesReportProps {
   students: Student[];
@@ -16,18 +17,31 @@ interface CumulativeGradesReportProps {
     newPoints: number,
     updatedScores: number[]
   ) => void;
+  onUpdateStudentExams?: (
+    barcode: string,
+    updatedExams: StudentExamRecord[],
+    pointsDelta?: number
+  ) => void;
   onOpenPdfModal: (type: "exams") => void;
 }
 
 export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
   students,
   onUpdateGradeRecord,
+  onUpdateStudentExams,
   onOpenPdfModal,
 }) => {
   const [filterGrade, setFilterGrade] = useState<string>("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedStudentForEdit, setSelectedStudentForEdit] = useState<Student | null>(null);
+  const [selectedStudentForHistory, setSelectedStudentForHistory] = useState<Student | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
+
+  // Sync selectedStudentForHistory when students array updates
+  const activeHistoryStudent = useMemo(() => {
+    if (!selectedStudentForHistory) return null;
+    return students.find((s) => s.barcode === selectedStudentForHistory.barcode) || selectedStudentForHistory;
+  }, [students, selectedStudentForHistory]);
 
   const filteredStudents = useMemo(() => {
     let result = students.filter((s) => {
@@ -70,7 +84,6 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
     // Recalculate scores array: replace the last item if exists or append
     let updatedScores = student.totalExamScores ? [...student.totalExamScores] : [];
     if (updatedScores.length > 0) {
-      // replace the last exam score with new percentage
       updatedScores[updatedScores.length - 1] = percentage;
     } else {
       updatedScores = [percentage];
@@ -107,6 +120,32 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
     setTimeout(() => {
       setFeedback(null);
     }, 4500);
+  };
+
+  const handleSaveStudentExams = (
+    barcode: string,
+    updatedExams: StudentExamRecord[],
+    pointsDelta: number = 0
+  ) => {
+    if (onUpdateStudentExams) {
+      onUpdateStudentExams(barcode, updatedExams, pointsDelta);
+    } else {
+      const student = students.find((s) => s.barcode === barcode);
+      const updatedScores = updatedExams.map((e) => e.percentage);
+      const last = updatedExams[updatedExams.length - 1];
+      const lastTitle = last ? last.examTitle : "";
+      const lastScore = last ? `${last.score}/${last.maxScore} (${last.percentage}%)` : "";
+      const newPoints = (student?.points || 0) + pointsDelta;
+      onUpdateGradeRecord(barcode, lastTitle, lastScore, newPoints, updatedScores);
+    }
+
+    setFeedback({
+      type: "success",
+      message: `✅ تم تحديث وحفظ سجل الامتحانات للطالب بنجاح!`,
+    });
+    setTimeout(() => {
+      setFeedback(null);
+    }, 3500);
   };
 
   return (
@@ -188,22 +227,23 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
           <table className="w-full text-right border-collapse text-xs font-tajawal">
             <thead>
               <tr className="bg-slate-950/60 text-amber-300 font-extrabold border-b border-indigo-500/20 font-fancy">
-                <th className="p-3.5">م</th>
+                <th className="p-3.5 text-center">م</th>
                 <th className="p-3.5">الباركود</th>
                 <th className="p-3.5">اسم الطالب</th>
                 <th className="p-3.5">الصف الدراسي</th>
-                <th className="p-3.5">آخر امتحان ودرجته</th>
-                <th className="p-3.5">نسبة الحضور</th>
-                <th className="p-3.5">نسبة الغياب</th>
-                <th className="p-3.5">متوسط درجات الاختبارات</th>
-                <th className="p-3.5">إجمالي النقاط ⭐</th>
+                <th className="p-3.5 text-center">سجل الامتحانات الكامل</th>
+                <th className="p-3.5">آخر امتحان</th>
+                <th className="p-3.5 text-center">متوسط الدرجات</th>
+                <th className="p-3.5 text-center">نسبة الحضور</th>
+                <th className="p-3.5 text-center">نسبة الغياب</th>
+                <th className="p-3.5 text-center">النقاط ⭐</th>
                 <th className="p-3.5 text-center">إجراءات</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-indigo-500/10 font-medium">
               {filteredStudents.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="p-8 text-center text-slate-400 italic">
+                  <td colSpan={11} className="p-8 text-center text-slate-400 italic">
                     {searchQuery ? `لا توجد نتائج مطابقة لـ "${searchQuery}"` : "لا يوجد طلاب مطابقين للبحث."}
                   </td>
                 </tr>
@@ -212,17 +252,32 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
                   const attRate = getAttendanceRate(student);
                   const absRate = getAbsenceRate(student);
                   const examAvg = getExamAverage(student);
+                  const examsCount =
+                    student.examHistory && student.examHistory.length > 0
+                      ? student.examHistory.length
+                      : student.totalExamScores?.length || 0;
 
                   return (
                     <tr key={student.barcode} className="hover:bg-amber-500/5 transition-colors">
-                      <td className="p-3.5 font-mono text-slate-400">{idx + 1}</td>
+                      <td className="p-3.5 font-mono text-slate-400 text-center">{idx + 1}</td>
                       <td className="p-3.5 font-mono text-amber-300 font-bold">{student.barcode}</td>
                       <td className="p-3.5 font-bold text-slate-100">{student.name}</td>
                       <td className="p-3.5 text-slate-300">{student.groupGrade}</td>
+                      <td className="p-3.5 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedStudentForHistory(student)}
+                          className="px-3 py-1.5 rounded-xl bg-amber-400/10 hover:bg-amber-400/20 border border-amber-400/30 text-amber-300 hover:text-amber-200 text-xs font-black inline-flex items-center gap-1.5 cursor-pointer shadow-sm transition-all hover:scale-105 active:scale-95"
+                          title="عرض وسجل كافة امتحانات الطالب بالتفصيل (سواء 10 أو 1000 امتحان)"
+                        >
+                          <BookOpen className="w-3.5 h-3.5" />
+                          <span>سجل الطالب ({examsCount} امتحان)</span>
+                        </button>
+                      </td>
                       <td className="p-3.5">
                         {student.lastExamScore ? (
                           <div className="font-bold text-amber-300">
-                            <span className="text-slate-300 text-[11px] block">
+                            <span className="text-slate-300 text-[11px] block truncate max-w-[140px]">
                               {student.lastExamTitle || "امتحان"}
                             </span>
                             {student.lastExamScore}
@@ -231,17 +286,9 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
                           <span className="text-slate-500 italic">لا يوجد</span>
                         )}
                       </td>
-                      <td className="p-3.5">
-                        <span className="font-bold text-emerald-400">{attRate}%</span>
-                      </td>
-                      <td className="p-3.5">
-                        <span className={`font-bold ${absRate > 20 ? "text-rose-400" : "text-slate-400"}`}>
-                          {absRate}%
-                        </span>
-                      </td>
-                      <td className="p-3.5">
+                      <td className="p-3.5 text-center">
                         <span
-                          className={`font-black px-2.5 py-1 rounded-xl text-xs ${
+                          className={`font-black px-2.5 py-1 rounded-xl text-xs inline-block ${
                             examAvg >= 85
                               ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                               : examAvg >= 65
@@ -252,31 +299,52 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
                           {examAvg}%
                         </span>
                       </td>
-                      <td className="p-3.5 font-black text-amber-300">
-                        <span className="flex items-center gap-1 font-mono">
+                      <td className="p-3.5 text-center">
+                        <span className="font-bold text-emerald-400">{attRate}%</span>
+                      </td>
+                      <td className="p-3.5 text-center">
+                        <span className={`font-bold ${absRate > 20 ? "text-rose-400" : "text-slate-400"}`}>
+                          {absRate}%
+                        </span>
+                      </td>
+                      <td className="p-3.5 font-black text-amber-300 text-center">
+                        <span className="inline-flex items-center gap-1 font-mono">
                           <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
                           {student.points || 0}
                         </span>
                       </td>
-                      <td className="p-3.5">
+                      <td className="p-3.5 text-center">
                         <div className="flex items-center justify-center gap-1.5">
                           <button
+                            type="button"
+                            onClick={() => setSelectedStudentForHistory(student)}
+                            className="px-2.5 py-1.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all hover:scale-105 active:scale-95"
+                            title="فتح سجل الامتحانات الكامل الخاص بالطالب"
+                          >
+                            <BookOpen className="w-3 h-3" />
+                            <span>السجل</span>
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={() => setSelectedStudentForEdit(student)}
                             className="px-2.5 py-1.5 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 border border-sky-500/30 text-sky-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer transition-all hover:scale-105 active:scale-95"
                             title="تعديل رصد درجة الامتحان وحساب النسبة"
                           >
                             <Edit3 className="w-3 h-3" />
-                            <span>تعديل الدرجة</span>
+                            <span>تعديل</span>
                           </button>
 
                           <button
+                            type="button"
                             onClick={() => {
-                              const reportMsg = `تقرير مستوى الطالب/ة: (${student.name})\nالصف: ${student.groupGrade}\nنسبة الحضور: ${attRate}%\nمتوسط درجات الامتحانات: ${examAvg}%\nآخر اختبار: ${
+                              const reportMsg = `تقرير مستوى الطالب/ة: (${student.name})\nالصف: ${student.groupGrade}\nعدد الامتحانات المؤداة: ${examsCount}\nنسبة الحضور: ${attRate}%\nمتوسط درجات الامتحانات: ${examAvg}%\nآخر اختبار: ${
                                 student.lastExamScore || "لا يوجد"
                               }\nإجمالي النقاط: ${student.points || 0} ⭐\nمع تحيات ميس إيمان الدمشيتي 📐`;
                               openWhatsApp(student.parentPhone || student.phone || "", reportMsg);
                             }}
                             className="px-2.5 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold cursor-pointer transition-all"
+                            title="إرسال عبر واتساب"
                           >
                             📲 واتساب
                           </button>
@@ -290,6 +358,16 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Interactive Individual Student Exam History Modal */}
+      {activeHistoryStudent && (
+        <StudentExamsHistoryModal
+          student={activeHistoryStudent}
+          isOpen={!!activeHistoryStudent}
+          onClose={() => setSelectedStudentForHistory(null)}
+          onSaveExams={handleSaveStudentExams}
+        />
+      )}
 
       {/* Interactive Edit Grade Modal */}
       {selectedStudentForEdit && (

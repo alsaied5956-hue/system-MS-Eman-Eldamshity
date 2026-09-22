@@ -490,29 +490,31 @@ export async function bulkUploadToSupabase(
     const studentId = barcodeToIdMap.get(b);
     if (!studentId) return;
 
-    if (Array.isArray(s.totalExamScores) && s.totalExamScores.length > 0) {
-      s.totalExamScores.forEach((score, idx) => {
+    if (Array.isArray(s.examHistory) && s.examHistory.length > 0) {
+      s.examHistory.forEach((ex) => {
         homeworkRows.push({
           student_id: studentId,
-          date_key: s.createdAt?.slice(0, 10) || todayKey,
-          title: s.lastExamTitle && idx === s.totalExamScores.length - 1 ? s.lastExamTitle : `امتحان دوري ${idx + 1}`,
+          date_key: ex.date || todayKey,
+          title: ex.examTitle || "امتحان",
           status: "done",
-          score: score,
-          max_score: 100,
-          notes: "رصد درجات مجمعة من النسخة الاحتياطية",
+          score: ex.score,
+          max_score: ex.maxScore || 20,
+          notes: ex.notes || "سجل محفوظ",
         });
       });
     } else if (s.lastExamScore) {
-      const parsedScore = parseFloat(s.lastExamScore);
-      if (!isNaN(parsedScore)) {
+      const match = s.lastExamScore.match(/^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)/);
+      const score = match ? parseFloat(match[1]) : parseFloat(s.lastExamScore);
+      const maxScore = match ? parseFloat(match[2]) : (score <= 20 ? 20 : 100);
+      if (!isNaN(score)) {
         homeworkRows.push({
           student_id: studentId,
           date_key: todayKey,
-          title: s.lastExamTitle || "امتحان شامل",
+          title: s.lastExamTitle || "التقييم الثاني",
           status: "done",
-          score: parsedScore,
-          max_score: 100,
-          notes: "رصد من النسخة الاحتياطية",
+          score: score,
+          max_score: maxScore,
+          notes: "سجل محفوظ",
         });
       }
     }

@@ -16,12 +16,15 @@ import {
   XCircle,
   HelpCircle,
   Users,
+  Trash2,
+  CalendarX,
 } from "lucide-react";
 
 interface DailyAttendanceReportProps {
   students: Student[];
   attendanceHistory: Record<string, Record<string, string>>;
   onUpdateStatus: (barcode: string, dateKey: string, newStatus: string) => void;
+  onDeleteDateRecords?: (dateKey: string) => void;
   onOpenPdfModal: (type: "attendance", targetDate?: string, targetAttendanceMap?: Record<string, string>) => void;
 }
 
@@ -31,6 +34,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   students,
   attendanceHistory,
   onUpdateStatus,
+  onDeleteDateRecords,
   onOpenPdfModal,
 }) => {
   const todayKey = getTodayKey();
@@ -47,6 +51,13 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   const [statusFilter, setStatusFilter] = useState<StatusFilterType>("ALL");
 
   const isFutureDate = selectedDate > todayKey;
+
+  // List of all dates that actually have attendance records
+  const recordedDates = useMemo(() => {
+    return Object.keys(attendanceHistory)
+      .filter((d) => attendanceHistory[d] && Object.keys(attendanceHistory[d]).length > 0)
+      .sort((a, b) => b.localeCompare(a));
+  }, [attendanceHistory]);
 
   // Automatically sync day-group filter when user changes date
   const handleDateChange = (newDate: string) => {
@@ -161,6 +172,43 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
 
   return (
     <div className="space-y-6">
+      {/* Recorded Dates Pill Selector */}
+      {recordedDates.length > 0 && (
+        <div className="glass-panel p-3.5 rounded-2xl flex flex-wrap items-center gap-2 font-tajawal text-xs shadow-md">
+          <span className="text-amber-300 font-bold flex items-center gap-1.5 shrink-0">
+            <Calendar className="w-3.5 h-3.5 text-amber-400" />
+            <span>الأيام المسجل لها حضور فعلي بالنظام:</span>
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {recordedDates.map((dKey) => {
+              const count = Object.keys(attendanceHistory[dKey] || {}).length;
+              const isCurrent = dKey === selectedDate;
+              return (
+                <button
+                  key={dKey}
+                  type="button"
+                  onClick={() => handleDateChange(dKey)}
+                  className={`px-3 py-1 rounded-xl font-mono text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    isCurrent
+                      ? "bg-amber-400 text-slate-950 shadow-md shadow-amber-400/20"
+                      : "bg-[#080d1e] border border-indigo-500/30 text-slate-300 hover:text-white hover:border-amber-400/50"
+                  }`}
+                >
+                  <span>{dKey}</span>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded-md ${
+                      isCurrent ? "bg-slate-900 text-amber-300 font-bold" : "bg-indigo-500/20 text-slate-400"
+                    }`}
+                  >
+                    {count} سجل
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Future Date Notification Banner */}
       {isFutureDate && (
         <div className="bg-sky-950/40 border border-sky-500/40 p-4 rounded-3xl flex items-start sm:items-center gap-3.5 text-sky-200 shadow-lg">
@@ -173,6 +221,19 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
               أنت تشاهد حالياً قائمة الطلاب المقيدين في مجموعة هذا اليوم ({filterDays}). لم يتم رصد حضور فعلي بعد وسيتم التحديث التلقائي فور بدء المسح بالسكانر.
             </p>
           </div>
+        </div>
+      )}
+
+      {/* No Attendance Recorded for this Date Banner */}
+      {Object.keys(dateAttendanceMap).length === 0 && !isFutureDate && (
+        <div className="glass-panel p-5 rounded-3xl border border-amber-500/30 bg-amber-500/5 text-center font-tajawal shadow-lg">
+          <CalendarX className="w-8 h-8 text-amber-400 mx-auto mb-2 opacity-80" />
+          <h4 className="text-sm font-bold text-slate-100 mb-1">
+            لا يوجد سجل حضور مسجل لتاريخ ({selectedDate})
+          </h4>
+          <p className="text-xs text-slate-400 max-w-lg mx-auto leading-relaxed">
+            لم تُعقد جلسات دراسية أو لم يتم رصد حضور للطلاب في هذا التاريخ (0 مسجلين كحضور/غياب). يمكنك الانتقال لأحد الأيام المسجلة من الشريط أعلاه.
+          </p>
         </div>
       )}
 
@@ -330,8 +391,24 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
           </div>
         </div>
 
-        {/* Export Buttons */}
+        {/* Export and Action Buttons */}
         <div className="flex items-center gap-2 font-tajawal">
+          {onDeleteDateRecords && Object.keys(dateAttendanceMap).length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(`هل أنت متأكد تماماً من رغبتك في مسح كافة سجلات الحضور المسجلة لتاريخ (${selectedDate})؟`)) {
+                  onDeleteDateRecords(selectedDate);
+                }
+              }}
+              className="px-3.5 py-2.5 rounded-2xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
+              title="مسح سجل هذا اليوم بالكامل من النظام"
+            >
+              <Trash2 className="w-4 h-4 text-rose-400" />
+              <span>مسح سجل اليوم</span>
+            </button>
+          )}
+
           <button
             onClick={() => exportAttendanceHistoryToExcel(displayedStudents, dateAttendanceMap, selectedDate)}
             className="px-3.5 py-2.5 rounded-2xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-400/30 text-emerald-300 text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"

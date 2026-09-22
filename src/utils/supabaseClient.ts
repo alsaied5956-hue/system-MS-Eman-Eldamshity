@@ -1342,32 +1342,126 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
       }
     });
 
-    // Fetch homework/exams to populate student test scores
-    const studentExamScores = new Map<string, { scores: number[]; lastTitle?: string; lastScore?: string }>();
-    const { data: hwData } = await supabase
-      .from("homework")
-      .select("student_id, title, score, max_score, date_key")
-      .order("created_at", { ascending: true });
-
     // Reverse lookup map from student_id to barcode
     const idToBarcodeMap = new Map<string, string>();
     allStudentsRows.forEach((r) => {
       if (r.id && r.barcode) idToBarcodeMap.set(r.id, String(r.barcode).trim());
     });
 
-    if (Array.isArray(hwData)) {
-      hwData.forEach((hw) => {
-        const b = idToBarcodeMap.get(hw.student_id);
-        if (b && hw.score !== null && hw.score !== undefined) {
-          const current = studentExamScores.get(b) || { scores: [] };
-          const pct = hw.max_score > 0 ? Math.round((hw.score / hw.max_score) * 100) : Number(hw.score);
-          current.scores.push(pct);
-          current.lastTitle = hw.title;
-          current.lastScore = `${hw.score}/${hw.max_score || 100}`;
-          studentExamScores.set(b, current);
-        }
-      });
+    // Helper to determine authentic teacher records vs bulk backup copies
+    const isTeacherDirectEntry = (notes?: string) => {
+      if (!notes) return false;
+      if (notes.includes("النسخة الاحتياطية")) return false;
+      return (
+        notes.includes("رصد درجة") ||
+        notes.includes("تعديل رصد") ||
+        notes.includes("alsaied") ||
+        notes.includes("امتحان")
+      );
+    };
+
+    // Fetch ALL homework/exams using pagination (all historical & latest exams)
+    const allHwRows: any[] = [];
+    let hwFrom = 0;
+    const hwStep = 1000;
+    while (true) {
+      const { data: chunk, error: hwErr } = await supabase
+        .from("homework")
+        .select("id, student_id, title, score, max_score, date_key, notes, created_at")
+        .order("created_at", { ascending: true })
+        .range(hwFrom, hwFrom + hwStep - 1);
+
+      if (hwErr || !chunk || chunk.length === 0) break;
+      allHwRows.push(...chunk);
+      if (chunk.length < hwStep) break;
+      hwFrom += hwStep;
+      if (allHwRows.length >= 60000) break;
     }
+
+    // Group and deduplicate authentic exam records per student
+    const studentExamRecordsMap = new Map<
+      string,
+      Map<string, { id: string; examTitle: string; date: string; score: number; maxScore: number; percentage: number; notes?: string; isDirect: boolean; createdAt: string }>
+    >();
+
+    allHwRows.forEach((hw) => {
+      const b = idToBarcodeMap.get(hw.student_id);
+      if (!b || hw.score === null || hw.score === undefined) return;
+
+      if (!studentExamRecordsMap.has(b)) {
+        studentExamRecordsMap.set(b, new Map());
+      }
+      const examMap = studentExamRecordsMap.get(b)!;
+
+      const rawTitle = (hw.title || "امتحان").trim();
+      let normTitle = rawTitle;
+      if (normTitle.includes("الاول") || normTitle.includes("الأول")) {
+        normTitle = "التقييم الأول";
+      } else if (normTitle.includes("الثاني")) {
+        normTitle = "التقييم الثاني";
+      } else if (normTitle.includes("الثالث")) {
+        normTitle = "التقييم الثالث";
+      }
+
+      const isDirect = isTeacherDirectEntry(hw.notes);
+      const score = Number(hw.score);
+      const maxScore = Number(hw.max_score) || (score <= 10 ? 10 : score <= 15 ? 15 : score <= 20 ? 20 : 100);
+      const percentage = maxScore > 0 ? Math.round((score / maxScore) * 100) : score;
+      const date = hw.date_key || (hw.created_at ? hw.created_at.slice(0, 10) : todayKey);
+
+      const record = {
+        id: hw.id || `exam_${b}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        examTitle: normTitle,
+        date,
+        score,
+        maxScore,
+        percentage,
+        notes: hw.notes || undefined,
+        isDirect,
+        createdAt: hw.created_at || date,
+      };
+
+      const prev = examMap.get(normTitle);
+      if (!prev) {
+        examMap.set(normTitle, record);
+      } else {
+        if (isDirect && !prev.isDirect) {
+          // Authentic teacher entry takes absolute precedence over generic backup row
+          examMap.set(normTitle, record);
+        } else if (!isDirect && prev.isDirect) {
+          // Keep the authentic teacher entry
+        } else {
+          // Both direct or both backup: later entry wins (e.g. teacher score modification)
+          if (new Date(record.createdAt) >= new Date(prev.createdAt)) {
+            examMap.set(normTitle, record);
+          }
+        }
+      }
+    });
+
+    const studentExamScores = new Map<
+      string,
+      { scores: number[]; history: any[]; lastTitle?: string; lastScore?: string }
+    >();
+
+    studentExamRecordsMap.forEach((map, b) => {
+      const sortedExams = Array.from(map.values()).sort((a, b) => {
+        const dDiff = a.date.localeCompare(b.date);
+        if (dDiff !== 0) return dDiff;
+        return a.createdAt.localeCompare(b.createdAt);
+      });
+
+      const cleanHistory = sortedExams.map(({ isDirect, createdAt, ...rest }) => rest);
+      const scores = cleanHistory.map((e) => e.percentage);
+      const last = cleanHistory[cleanHistory.length - 1];
+
+      studentExamScores.set(b, {
+        scores,
+        history: cleanHistory,
+        lastTitle: last ? last.examTitle : undefined,
+        lastScore: last ? `${last.score}/${last.maxScore} (${last.percentage}%)` : undefined,
+      });
+    });
 
     const mappedStudents = allStudentsRows.map((row) => {
       const b = String(row.barcode).trim();
@@ -1388,6 +1482,7 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
         totalAttendanceDays: counts?.present || 0,
         totalAbsentDays: counts?.absent || 0,
         totalExamScores: examInfo?.scores || [],
+        examHistory: examInfo?.history || [],
         lastExamTitle: examInfo?.lastTitle,
         lastExamScore: examInfo?.lastScore,
         createdAt: row.created_at || new Date().toISOString(),

@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Student } from "../types";
+import type { Student } from "../types.ts";
 
 /**
  * Gemini Service Configuration & Limits

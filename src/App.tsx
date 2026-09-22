@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Student,
+  StudentExamRecord,
   PaymentRecord,
   UserAccount,
   GradeName,
@@ -34,6 +35,7 @@ import {
   getSyncStatus,
   clearAllSystemData,
   loadLocalData,
+  syncDataToCloud,
   purgeTombstoneBarcode,
   autoPushLocalDiskOnStartup,
   pullLatestCloudDataImmediately,
@@ -266,6 +268,10 @@ export default function App() {
         appStudentsRef.current = authoritativeList;
         // Purge any locally stored deleted students to keep disk cache strictly in sync
         saveStudentsData(authoritativeList);
+        syncDataToCloud({
+          ...loadLocalData(),
+          students: authoritativeList,
+        });
 
         if (res.attendanceToday && Object.keys(res.attendanceToday).length > 0) {
           setAttendanceToday((prev) => {
@@ -667,13 +673,31 @@ export default function App() {
           if (s.barcode === payload.barcode) {
             const pct = payload.percentage;
             const scoreFormatted = `${payload.score}/${payload.maxScore} (${pct}%)`;
-            const scores = s.totalExamScores ? [...s.totalExamScores, pct] : [pct];
             const pointsBonus = pct === 100 ? 20 : pct >= 90 ? 10 : pct >= 75 ? 5 : 0;
+            
+            const newExamRec = {
+              id: `exam_${s.barcode}_${Date.now()}`,
+              examTitle: payload.examTitle,
+              date: payload.dateKey || getTodayKey(),
+              score: payload.score,
+              maxScore: payload.maxScore,
+              percentage: pct,
+            };
+            const currentHistory = Array.isArray(s.examHistory) ? [...s.examHistory] : [];
+            const existingIdx = currentHistory.findIndex((e) => e.examTitle === payload.examTitle);
+            if (existingIdx >= 0) {
+              currentHistory[existingIdx] = newExamRec;
+            } else {
+              currentHistory.push(newExamRec);
+            }
+            const scores = currentHistory.map((e) => e.percentage);
+
             return {
               ...s,
               lastExamTitle: payload.examTitle,
               lastExamScore: scoreFormatted,
               totalExamScores: scores,
+              examHistory: currentHistory,
               points: (s.points || 0) + pointsBonus,
             };
           }
@@ -1784,12 +1808,32 @@ export default function App() {
         if (s.barcode === barcode) {
           const scores = s.totalExamScores ? [...s.totalExamScores, pct] : [pct];
           const pointsBonus = pct === 100 ? 20 : pct >= 90 ? 10 : pct >= 75 ? 5 : 0;
+          const newExamRecord: StudentExamRecord = {
+            id: `exam_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            examTitle,
+            date: getTodayKey(),
+            score,
+            maxScore,
+            percentage: pct,
+          };
+          const examHistory = Array.isArray(s.examHistory) && s.examHistory.length > 0
+            ? [...s.examHistory, newExamRecord]
+            : (s.totalExamScores || []).map((sc, i) => ({
+                id: `exam_${s.barcode}_${i + 1}`,
+                examTitle: `امتحان دوري ${i + 1}`,
+                date: s.createdAt ? s.createdAt.slice(0, 10) : getTodayKey(),
+                score: sc,
+                maxScore: 100,
+                percentage: sc,
+                notes: "سجل محفوظ",
+              })).concat(newExamRecord);
 
           return {
             ...s,
             lastExamTitle: examTitle,
             lastExamScore: scoreFormatted,
             totalExamScores: scores,
+            examHistory,
             points: (s.points || 0) + pointsBonus,
           };
         }
@@ -1815,6 +1859,86 @@ export default function App() {
       alert(`❌ فشل رصد الدرجة في السحابة: ${err?.message || "خطأ غير معروف"}`);
     }
   }, [students, currentUser]);
+
+  // Handler: Update Full Student Exam Ledger (Supports unlimited past exams: 10, 100, 1000+)
+  const handleUpdateStudentExams = useCallback(
+    async (barcode: string, updatedExams: StudentExamRecord[], pointsDelta: number = 0) => {
+      const targetStudent = students.find((s) => s.barcode === barcode);
+      const updatedScores = updatedExams.map((e) => e.percentage);
+      const last = updatedExams[updatedExams.length - 1];
+      const lastTitle = last ? last.examTitle : "";
+      const lastScore = last ? `${last.score}/${last.maxScore} (${last.percentage}%)` : "";
+      const newPoints = (targetStudent?.points || 0) + pointsDelta;
+
+      const updated = students.map((s) => {
+        if (s.barcode === barcode) {
+          return {
+            ...s,
+            examHistory: updatedExams,
+            totalExamScores: updatedScores,
+            lastExamTitle: lastTitle,
+            lastExamScore: lastScore,
+            points: newPoints,
+          };
+        }
+        return s;
+      });
+
+      setStudents(updated);
+      saveStudentsData(updated);
+
+      if (last) {
+        try {
+          await cloudRecordExamGrade({
+            barcode,
+            studentName: targetStudent?.name || `طالب ${barcode}`,
+            examTitle: lastTitle,
+            score: last.score,
+            maxScore: last.maxScore,
+            recordedBy: currentUser?.username || "admin",
+          });
+
+          dualSyncExamGrade({
+            barcode,
+            studentName: targetStudent?.name,
+            examTitle: lastTitle,
+            score: last.score,
+            maxScore: last.maxScore,
+            notes: `سجل امتحانات الطالب (${updatedExams.length} امتحان)`,
+            recordedBy: currentUser?.username || "admin",
+            studentFallback: targetStudent,
+          });
+        } catch (err) {
+          console.warn("[App] Cloud sync of student exam ledger warning:", err);
+        }
+      }
+    },
+    [students, currentUser]
+  );
+
+  // Handler: Delete all attendance records for a specific date
+  const handleDeleteDateAttendance = useCallback(
+    async (dateKey: string) => {
+      const updatedHistory = { ...attendanceHistory };
+      delete updatedHistory[dateKey];
+      setAttendanceHistory(updatedHistory);
+      saveAttendanceHistoryData(updatedHistory);
+
+      const isToday = dateKey === getTodayKey();
+      if (isToday) {
+        setAttendanceToday({});
+        saveAttendanceTodayData({});
+      }
+
+      const currentLocal = loadLocalData();
+      syncDataToCloud({
+        ...currentLocal,
+        attendanceHistory: updatedHistory,
+        attendanceToday: isToday ? {} : (currentLocal.attendanceToday || {}),
+      });
+    },
+    [attendanceHistory]
+  );
 
   // Handler: Update Grade Record from Cumulative Table
   const handleUpdateGradeRecord = useCallback(async (
@@ -2137,6 +2261,7 @@ export default function App() {
                   students={students}
                   attendanceHistory={attendanceHistory}
                   onUpdateStatus={handleChangeAttendanceStatus}
+                  onDeleteDateRecords={handleDeleteDateAttendance}
                   onOpenPdfModal={(type, targetDate, targetAttendanceMap) =>
                     setPrintModal({ open: true, type, targetDate, targetAttendanceMap })
                   }
@@ -2147,6 +2272,7 @@ export default function App() {
                 <CumulativeGradesReport
                   students={students}
                   onUpdateGradeRecord={handleUpdateGradeRecord}
+                  onUpdateStudentExams={handleUpdateStudentExams}
                   onOpenPdfModal={(type) => setPrintModal({ open: true, type })}
                 />
               )}

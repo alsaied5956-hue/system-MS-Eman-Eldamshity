@@ -519,20 +519,16 @@ export function loadLocalData(): SystemData {
     const filteredHistory: Record<string, Record<string, string>> = {};
     for (const [dKey, dayMap] of Object.entries(rawHistory)) {
       if (!dayMap) continue;
+      // Skip bulk mock simulated entries (> 200 entries on a single date) and fake dates
+      if (dKey === "2026-09-23" || dKey === "2026-09-22" || Object.keys(dayMap).length > 200) {
+        continue;
+      }
       for (const [bCode, status] of Object.entries(dayMap)) {
         const cleanB = String(bCode).trim();
         const attKey = `${dKey}_${cleanB}`;
         if (deletedAttendanceKeysSet.has(attKey) || deletedBarcodesSet.has(cleanB)) continue;
         if (!filteredHistory[dKey]) filteredHistory[dKey] = {};
         filteredHistory[dKey][cleanB] = status;
-      }
-    }
-
-    // Strict Date Isolation:
-    // If local storage has an old attendanceTodayDate, archive it to its respective date
-    if (parsed.attendanceTodayDate && parsed.attendanceTodayDate !== todayKey) {
-      if (!filteredHistory[parsed.attendanceTodayDate] && parsed.attendanceToday) {
-        filteredHistory[parsed.attendanceTodayDate] = parsed.attendanceToday;
       }
     }
 
@@ -546,14 +542,17 @@ export function loadLocalData(): SystemData {
     // attendanceToday MUST strictly belong to todayKey.
     // Never fallback to obsolete yesterday's attendanceToday if today is a new day!
     const isTodayRecordValid = parsed.attendanceTodayDate === todayKey;
-    const rawToday: Record<string, string> =
-      isTodayRecordValid ? (filteredHistory[todayKey] || parsed.attendanceToday || {}) : (filteredHistory[todayKey] || {});
+    const rawToday: Record<string, string> = isTodayRecordValid
+      ? (filteredHistory[todayKey] || parsed.attendanceToday || {})
+      : (filteredHistory[todayKey] || {});
     const filteredToday: Record<string, string> = {};
-    for (const [bCode, status] of Object.entries(rawToday)) {
-      const cleanB = String(bCode).trim();
-      const attKey = `${todayKey}_${cleanB}`;
-      if (deletedAttendanceKeysSet.has(attKey) || deletedBarcodesSet.has(cleanB)) continue;
-      filteredToday[cleanB] = status;
+    if (isTodayRecordValid) {
+      for (const [bCode, status] of Object.entries(rawToday)) {
+        const cleanB = String(bCode).trim();
+        const attKey = `${todayKey}_${cleanB}`;
+        if (deletedAttendanceKeysSet.has(attKey) || deletedBarcodesSet.has(cleanB)) continue;
+        filteredToday[cleanB] = status;
+      }
     }
 
     // Merge users so that admin, alsaied, eman, mahmoud always exist
@@ -1547,13 +1546,40 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
           // Merge student properties intelligently
           const localScores = Array.isArray(existing.totalExamScores) ? existing.totalExamScores : [];
           const remoteScores = Array.isArray(remoteStudent.totalExamScores) ? remoteStudent.totalExamScores : [];
-          const mergedScores = Array.from(new Set([...localScores, ...remoteScores]));
+
+          // Merge student examHistory records without loss, preferring authentic remote data
+          const localHistory = Array.isArray(existing.examHistory) ? existing.examHistory : [];
+          const remoteHistory = Array.isArray(remoteStudent.examHistory) ? remoteStudent.examHistory : [];
+          const historyMap = new Map<string, any>();
+          
+          // Seed with remote authoritative history
+          remoteHistory.forEach((e) => historyMap.set(e.examTitle || e.id, e));
+          // If local has newer or distinct exams, merge them
+          localHistory.forEach((e) => {
+            const k = e.examTitle || e.id;
+            if (!historyMap.has(k)) {
+              historyMap.set(k, e);
+            } else {
+              const existingRec = historyMap.get(k);
+              if (e.date && existingRec.date && e.date > existingRec.date) {
+                historyMap.set(k, e);
+              }
+            }
+          });
+          const mergedExamHistory = Array.from(historyMap.values()).sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+          const mergedScores = mergedExamHistory.length > 0
+            ? mergedExamHistory.map((e) => e.percentage)
+            : (remoteScores.length > 0 ? remoteScores : localScores);
+
+          const lastExam = mergedExamHistory.length > 0 ? mergedExamHistory[mergedExamHistory.length - 1] : null;
 
           studentMap.set(existingKey, {
             ...existing,
             ...remoteStudent,
-            ...existing, // local takes precedence
-            totalExamScores: mergedScores.length > 0 ? mergedScores : (localScores.length > 0 ? localScores : remoteScores),
+            totalExamScores: mergedScores,
+            examHistory: mergedExamHistory,
+            lastExamTitle: lastExam ? lastExam.examTitle : (remoteStudent.lastExamTitle || existing.lastExamTitle),
+            lastExamScore: lastExam ? `${lastExam.score}/${lastExam.maxScore} (${lastExam.percentage}%)` : (remoteStudent.lastExamScore || existing.lastExamScore),
           });
         }
       });
@@ -1567,12 +1593,18 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
 
   if (local.attendanceHistory) {
     for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
+      if (dateKey === "2026-09-23" || dateKey === "2026-09-22" || (dayMap && Object.keys(dayMap).length > 200)) {
+        continue;
+      }
       mergedHistory[dateKey] = { ...(dayMap || {}) };
     }
   }
 
   if (cloud.attendanceHistory) {
     for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
+      if (dateKey === "2026-09-23" || dateKey === "2026-09-22" || (remoteDayMap && Object.keys(remoteDayMap).length > 200)) {
+        continue;
+      }
       if (!mergedHistory[dateKey]) {
         mergedHistory[dateKey] = {};
       }
@@ -1587,10 +1619,15 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     }
   }
 
-  // 2. Merge Today's Attendance without EVER downgrading or dropping physical attendance
+  // 2. Merge Today's Attendance without EVER adopting yesterday's obsolete records
+  const isCloudTodayValid = cloud.attendanceTodayDate === todayKey;
+  const validCloudToday = isCloudTodayValid ? (cloud.attendanceToday || {}) : {};
+  const isLocalTodayValid = local.attendanceTodayDate === todayKey;
+  const validLocalToday = isLocalTodayValid ? (local.attendanceToday || {}) : {};
+
   const allTodayBarcodes = new Set([
-    ...Object.keys(cloud.attendanceToday || {}),
-    ...Object.keys(local.attendanceToday || {}),
+    ...Object.keys(validCloudToday),
+    ...Object.keys(validLocalToday),
   ]);
   const mergedToday: Record<string, string> = {};
   allTodayBarcodes.forEach((b) => {
@@ -1598,8 +1635,8 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     if (deletedSet.has(cleanB) || deletedAttendanceSet.has(`${todayKey}_${cleanB}`)) {
       return;
     }
-    const loc = local.attendanceToday?.[b];
-    const cld = cloud.attendanceToday?.[b];
+    const loc = validLocalToday[b];
+    const cld = validCloudToday[b];
     // If marked "حضور" or "تأخير" on either local or cloud, prioritize physical entry!
     if (loc === "حضور" || cld === "حضور") {
       mergedToday[b] = "حضور";
@@ -1621,10 +1658,12 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     }
   }
 
-  mergedHistory[todayKey] = {
-    ...(mergedHistory[todayKey] || {}),
-    ...mergedToday,
-  };
+  if (Object.keys(mergedToday).length > 0) {
+    mergedHistory[todayKey] = {
+      ...(mergedHistory[todayKey] || {}),
+      ...mergedToday,
+    };
+  }
 
   // 3. Merge Scan Log Order & Times: Smart Union of local and cloud scans (never overwrite or wipe)
   const remoteOrder = Array.isArray(cloud.scanLogOrder) ? cloud.scanLogOrder : [];

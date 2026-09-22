@@ -161,6 +161,10 @@ export function sortStudentsByGradeAndName(students: Student[]): Student[] {
 }
 
 export function getExamAverage(student: Student): number {
+  if (Array.isArray(student.examHistory) && student.examHistory.length > 0) {
+    const sum = student.examHistory.reduce((acc, curr) => acc + (Number(curr.percentage) || 0), 0);
+    return Math.round(sum / student.examHistory.length);
+  }
   if (!student.totalExamScores || student.totalExamScores.length === 0) return 0;
   const sum = student.totalExamScores.reduce((acc, curr) => acc + curr, 0);
   return Math.round(sum / student.totalExamScores.length);

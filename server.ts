@@ -1,4 +1,5 @@
-import express, { Request, Response, NextFunction } from "express";
+import express from "express";
+import type { Request, Response, NextFunction } from "express";
 import path from "path";
 import fs from "fs";
 import zlib from "zlib";
@@ -15,7 +16,7 @@ import {
   analyzeStudentPerformance,
   generateSmartNotification,
   getAiServiceHealth,
-} from "./src/server/geminiService";
+} from "./src/server/geminiService.ts";
 
 // Directory and file for zero-quota real-time sync persistence
 const SYNC_DATA_DIR = path.join(process.cwd(), "data");
@@ -362,6 +363,52 @@ function compressCloudPayload(data: any): string {
   }
 }
 
+function sanitizeStatePayload(payload: any): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  let changed = false;
+  const todayKey = new Date().toISOString().slice(0, 10);
+
+  // 1. Sanitize attendanceToday: never retain yesterday's attendance on a new day
+  if (payload.attendanceTodayDate !== todayKey) {
+    if (payload.attendanceToday && Object.keys(payload.attendanceToday).length > 0) {
+      payload.attendanceToday = {};
+      payload.scanLogOrder = [];
+      payload.scanLogTimes = {};
+      changed = true;
+    }
+    payload.attendanceTodayDate = todayKey;
+  }
+
+  // 2. Sanitize attendanceHistory: remove fake dates like 2026-09-23 and bulk simulated entries (> 200 records)
+  if (payload.attendanceHistory && typeof payload.attendanceHistory === "object") {
+    if (payload.attendanceHistory["2026-09-23"]) {
+      delete payload.attendanceHistory["2026-09-23"];
+      changed = true;
+    }
+    if (payload.attendanceHistory["2026-09-22"]) {
+      delete payload.attendanceHistory["2026-09-22"];
+      changed = true;
+    }
+    for (const [dateStr, records] of Object.entries(payload.attendanceHistory)) {
+      if (records && typeof records === "object" && Object.keys(records).length > 200) {
+        delete payload.attendanceHistory[dateStr];
+        changed = true;
+      }
+    }
+  }
+
+  // 3. Ensure student examHistory is preserved if present
+  if (Array.isArray(payload.students)) {
+    payload.students.forEach((s: any) => {
+      if (!Array.isArray(s.examHistory)) {
+        s.examHistory = [];
+      }
+    });
+  }
+
+  return changed;
+}
+
 async function syncServerWithFirestore() {
   const db = initServerFirestore();
   if (!db) return;
@@ -374,10 +421,26 @@ async function syncServerWithFirestore() {
       if (d._compressedPayload) {
         const decompressed = decompressCloudPayload(d._compressedPayload);
         if (decompressed && Array.isArray(decompressed.students)) {
+          const wasCleaned = sanitizeStatePayload(decompressed);
           cachedServerState = decompressed;
-          lastServerUpdate = d.updatedAt || Date.now();
+          lastServerUpdate = wasCleaned ? Date.now() : (d.updatedAt || Date.now());
           fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(decompressed), "utf-8");
-          console.log(`[Sync Hub] Synced from Firestore successfully (${decompressed.students.length} students)`);
+          console.log(`[Sync Hub] Synced from Firestore successfully (${decompressed.students.length} students). Cleaned mock data: ${wasCleaned}`);
+
+          // If cleaned, persist sanitized state back to Firestore immediately
+          if (wasCleaned) {
+            setDoc(
+              docRef,
+              {
+                _compressedPayload: compressCloudPayload(decompressed),
+                studentsCount: decompressed.students.length,
+                updatedAt: lastServerUpdate,
+                _lastClientId: "server_sanitizer",
+                syncedAtIso: new Date().toISOString(),
+              },
+              { merge: true }
+            ).catch((e) => console.warn("[Sync Hub] Failed to update sanitized state to Firestore:", e));
+          }
         }
       }
     }
@@ -391,6 +454,7 @@ async function syncServerWithFirestore() {
         if (d._compressedPayload && d.updatedAt && d.updatedAt > lastServerUpdate) {
           const decompressed = decompressCloudPayload(d._compressedPayload);
           if (decompressed && Array.isArray(decompressed.students)) {
+            sanitizeStatePayload(decompressed);
             cachedServerState = decompressed;
             lastServerUpdate = d.updatedAt;
             fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(decompressed), "utf-8");
