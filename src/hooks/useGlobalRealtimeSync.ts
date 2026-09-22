@@ -325,21 +325,35 @@ export function useGlobalRealtimeSync({
             return nextHist;
           });
 
-          // 3. Increment/adjust attendance stats on student in-memory object
+          // 3. Increment/adjust attendance stats on student in-memory object cleanly
           setStudents((prev) => {
             const next = prev.map((s) => {
               if (s.barcode === barcode) {
-                if (normalizedStatus === "غائب") {
-                  return {
-                    ...s,
-                    totalAbsentDays: (s.totalAbsentDays || 0) + 1,
-                  };
-                } else {
-                  return {
-                    ...s,
-                    totalAttendanceDays: (s.totalAttendanceDays || 0) + 1,
-                  };
+                let attCount = s.totalAttendanceDays || 0;
+                let absCount = s.totalAbsentDays || 0;
+
+                if (eventType === "INSERT") {
+                  if (normalizedStatus === "غائب") {
+                    absCount += 1;
+                  } else {
+                    attCount += 1;
+                  }
+                } else if (eventType === "UPDATE" && oldRow) {
+                  const oldNorm = (oldRow.status === "غائب" || oldRow.status === "غياب") ? "غائب" : oldRow.status;
+                  if (oldNorm === "غائب" && (normalizedStatus === "حضور" || normalizedStatus === "تأخير")) {
+                    absCount = Math.max(0, absCount - 1);
+                    attCount += 1;
+                  } else if ((oldNorm === "حضور" || oldNorm === "تأخير") && normalizedStatus === "غائب") {
+                    attCount = Math.max(0, attCount - 1);
+                    absCount += 1;
+                  }
                 }
+
+                return {
+                  ...s,
+                  totalAttendanceDays: attCount,
+                  totalAbsentDays: absCount,
+                };
               }
               return s;
             });

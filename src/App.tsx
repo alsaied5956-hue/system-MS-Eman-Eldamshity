@@ -1121,13 +1121,12 @@ export default function App() {
 
     const updatedStudents = (appStudentsRef.current || students).map((s) => {
       const b = String(s.barcode).trim();
-      if (absentBarcodes.has(b) && updatedToday[b] === "غائب") {
-        const wasAbsent = attendanceToday[b] === "غائب";
+      if (absentBarcodes.has(b) && (updatedToday[b] === "غائب" || updatedToday[b] === "غياب")) {
+        const wasAbsent = attendanceToday[b] === "غائب" || attendanceToday[b] === "غياب";
         if (!wasAbsent) {
           return {
             ...s,
             totalAbsentDays: (s.totalAbsentDays || 0) + 1,
-            totalAttendanceDays: Math.max(0, (s.totalAttendanceDays || 0) - 1),
           };
         }
       }
