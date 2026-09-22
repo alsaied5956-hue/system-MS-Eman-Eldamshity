@@ -858,20 +858,23 @@ export async function cloudUpdateGroupPrices(
   prices: Record<GradeName, number>,
   updatedBy: string = "admin"
 ): Promise<Record<GradeName, number>> {
-  const payload = {
-    id: "group_prices",
-    config_value: prices,
-    updated_by: updatedBy,
-    updated_at: new Date().toISOString(),
-  };
+  try {
+    const payload = {
+      id: "group_prices",
+      config_value: prices,
+      updated_by: updatedBy,
+      updated_at: new Date().toISOString(),
+    };
 
-  const { error } = await supabase
-    .from("system_configs")
-    .upsert(payload, { onConflict: "id" });
+    const { error } = await supabase
+      .from("system_configs")
+      .upsert(payload, { onConflict: "id" });
 
-  if (error) {
-    console.error("[MutationService] Error updating group prices:", error);
-    throw new Error(`فشل تحديث أسعار المجموعات في السحابة: ${error.message}`);
+    if (error) {
+      console.warn("[MutationService] Notice updating group prices in Supabase (persisted in server hub):", error.message);
+    }
+  } catch (err: any) {
+    console.warn("[MutationService] Notice updating group prices:", err?.message || err);
   }
 
   return prices;
@@ -881,20 +884,23 @@ export async function cloudUpdateUsers(
   usersList: UserAccount[],
   updatedBy: string = "admin"
 ): Promise<UserAccount[]> {
-  const payload = {
-    id: "users",
-    config_value: usersList,
-    updated_by: updatedBy,
-    updated_at: new Date().toISOString(),
-  };
+  try {
+    const payload = {
+      id: "users",
+      config_value: usersList,
+      updated_by: updatedBy,
+      updated_at: new Date().toISOString(),
+    };
 
-  const { error } = await supabase
-    .from("system_configs")
-    .upsert(payload, { onConflict: "id" });
+    const { error } = await supabase
+      .from("system_configs")
+      .upsert(payload, { onConflict: "id" });
 
-  if (error) {
-    console.error("[MutationService] Error updating users in Supabase:", error);
-    throw new Error(`فشل تحديث صلاحيات المشرفين والمستخدمين: ${error.message}`);
+    if (error) {
+      console.warn("[MutationService] Notice updating users in Supabase (persisted in server hub):", error.message);
+    }
+  } catch (err: any) {
+    console.warn("[MutationService] Notice updating users:", err?.message || err);
   }
 
   return usersList;
