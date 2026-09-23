@@ -698,7 +698,7 @@ export default function App() {
               lastExamScore: scoreFormatted,
               totalExamScores: scores,
               examHistory: currentHistory,
-              points: (s.points || 0) + pointsBonus,
+              points: 0,
             };
           }
           return s;
@@ -1834,7 +1834,7 @@ export default function App() {
             lastExamScore: scoreFormatted,
             totalExamScores: scores,
             examHistory,
-            points: (s.points || 0) + pointsBonus,
+            points: 0,
           };
         }
         return s;
@@ -1878,7 +1878,7 @@ export default function App() {
             totalExamScores: updatedScores,
             lastExamTitle: lastTitle,
             lastExamScore: lastScore,
-            points: newPoints,
+            points: 0,
           };
         }
         return s;
@@ -1971,7 +1971,7 @@ export default function App() {
             ...s,
             lastExamTitle: lastTitle,
             lastExamScore: lastScore,
-            points: newPoints,
+            points: 0,
             totalExamScores: updatedScores,
           };
         }

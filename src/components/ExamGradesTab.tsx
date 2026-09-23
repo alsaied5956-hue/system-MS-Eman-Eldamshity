@@ -256,9 +256,6 @@ export const ExamGradesTab: React.FC<ExamGradesTabProps> = ({
                   {selectedStudent.groupGrade} • {selectedStudent.groupDays} • باركود #{selectedStudent.barcode}
                 </p>
               </div>
-              <div className="text-left font-mono text-xs text-amber-300">
-                ⭐ النقاط: {selectedStudent.points || 0}
-              </div>
             </div>
           )}
 

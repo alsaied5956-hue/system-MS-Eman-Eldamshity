@@ -99,7 +99,6 @@ export const PrintPDFModal: React.FC<PrintPDFModalProps> = ({
               <>
                 <th className="p-2 border border-slate-300">آخر امتحان ودرجته</th>
                 <th className="p-2 border border-slate-300 text-center">متوسط الامتحانات</th>
-                <th className="p-2 border border-slate-300 text-center">النقاط ⭐</th>
               </>
             ) : (
               <>
@@ -185,9 +184,6 @@ export const PrintPDFModal: React.FC<PrintPDFModalProps> = ({
                     </td>
                     <td className="p-2 border border-slate-300 text-center font-black">
                       {examAvg}%
-                    </td>
-                    <td className="p-2 border border-slate-300 text-center font-bold text-amber-700">
-                      {student.points || 0} ⭐
                     </td>
                   </>
                 ) : (

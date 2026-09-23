@@ -363,12 +363,24 @@ function compressCloudPayload(data: any): string {
   }
 }
 
+const ATTENDANCE_SYSTEM_WIPE_EPOCH = 1774310000000;
+
 function sanitizeStatePayload(payload: any): boolean {
   if (!payload || typeof payload !== "object") return false;
   let changed = false;
   const todayKey = new Date().toISOString().slice(0, 10);
 
-  // 1. Sanitize attendanceToday: never retain yesterday's attendance on a new day
+  // 1. Enforce complete attendance wipe if before wipe epoch or attendanceWipedAt is set
+  if (!payload.attendanceWipedAt || payload.attendanceWipedAt < ATTENDANCE_SYSTEM_WIPE_EPOCH) {
+    payload.attendanceHistory = {};
+    payload.attendanceToday = {};
+    payload.scanLogOrder = [];
+    payload.scanLogTimes = {};
+    payload.attendanceWipedAt = ATTENDANCE_SYSTEM_WIPE_EPOCH;
+    changed = true;
+  }
+
+  // 2. Sanitize attendanceToday: never retain yesterday's attendance on a new day
   if (payload.attendanceTodayDate !== todayKey) {
     if (payload.attendanceToday && Object.keys(payload.attendanceToday).length > 0) {
       payload.attendanceToday = {};
@@ -379,27 +391,23 @@ function sanitizeStatePayload(payload: any): boolean {
     payload.attendanceTodayDate = todayKey;
   }
 
-  // 2. Sanitize attendanceHistory: remove fake dates like 2026-09-23 and bulk simulated entries (> 200 records)
-  if (payload.attendanceHistory && typeof payload.attendanceHistory === "object") {
-    if (payload.attendanceHistory["2026-09-23"]) {
-      delete payload.attendanceHistory["2026-09-23"];
-      changed = true;
-    }
-    if (payload.attendanceHistory["2026-09-22"]) {
-      delete payload.attendanceHistory["2026-09-22"];
-      changed = true;
-    }
-    for (const [dateStr, records] of Object.entries(payload.attendanceHistory)) {
-      if (records && typeof records === "object" && Object.keys(records).length > 200) {
-        delete payload.attendanceHistory[dateStr];
-        changed = true;
-      }
-    }
-  }
-
-  // 3. Ensure student examHistory is preserved if present
+  // 3. Remove points and enforce 0 points system wide, preserve all student info & exam history
   if (Array.isArray(payload.students)) {
     payload.students.forEach((s: any) => {
+      if (s.points !== 0) {
+        s.points = 0;
+        changed = true;
+      }
+      if (!payload.attendanceHistory || Object.keys(payload.attendanceHistory).length === 0) {
+        if (s.totalAttendanceDays !== 0) {
+          s.totalAttendanceDays = 0;
+          changed = true;
+        }
+        if (s.totalAbsentDays !== 0) {
+          s.totalAbsentDays = 0;
+          changed = true;
+        }
+      }
       if (!Array.isArray(s.examHistory)) {
         s.examHistory = [];
       }
@@ -789,6 +797,9 @@ async function startServer() {
     stateToSave.deletedBarcodes = allDeletedBarcodes;
     stateToSave.deletedPaymentKeys = allDeletedPaymentKeys;
     stateToSave.deletedAttendanceKeys = allDeletedAttendanceKeys;
+
+    // Apply strict sanitization: wipe epoch enforcement and 0 points
+    sanitizeStatePayload(stateToSave);
 
     cachedServerState = stateToSave;
     lastServerUpdate = Date.now();

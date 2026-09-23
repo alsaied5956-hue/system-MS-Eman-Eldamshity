@@ -50,6 +50,7 @@ const STORAGE_KEY = "center_data_v2";
 const PENDING_SYNC_KEY = "center_pending_sync_v2";
 const LAST_SYNC_TIME_KEY = "center_last_sync_time";
 const BROADCAST_CHANNEL_NAME = "aiman_system_sync_bus";
+export const ATTENDANCE_SYSTEM_WIPE_EPOCH = 1774310000000;
 
 export const CLIENT_ID =
   typeof window !== "undefined"
@@ -84,6 +85,7 @@ export interface SystemData {
   deletedBarcodes?: string[]; // Track deleted student barcodes to prevent zombie resurrects
   deletedPaymentKeys?: string[]; // Track deleted payment keys (monthKey_barcode) to prevent zombie resurrects
   deletedAttendanceKeys?: string[]; // Track deleted attendance keys (dateKey_barcode) to prevent zombie resurrects
+  attendanceWipedAt?: number; // Master wipe epoch for multi-device sync
   scanLogUpdatedAt?: number; // Exact timestamp when scanLog was modified
   updatedAt?: number; // Epoch timestamp in ms for conflict resolution
 }
@@ -566,13 +568,32 @@ export function loadLocalData(): SystemData {
     }
     const finalUsersList = Array.from(userMap.values());
 
+    // -------------------------------------------------------------
+    // System Wipe Guard: Attendance wipe & Points removal enforcement
+    // -------------------------------------------------------------
+    const isWiped = Boolean(parsed.attendanceWipedAt && parsed.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
+
+    const effectiveHistory = isWiped ? filteredHistory : {};
+    const effectiveToday = isWiped ? filteredToday : {};
+    const effectiveScanOrder = isWiped ? initialScanOrder : [];
+    const effectiveScanTimes = isWiped ? filteredScanTimes : {};
+
+    // Remove points system and ensure 0 points; reset attendance totals if wiped
+    finalStudents.forEach((s) => {
+      s.points = 0;
+      if (!isWiped) {
+        s.totalAttendanceDays = 0;
+        s.totalAbsentDays = 0;
+      }
+    });
+
     const loaded: SystemData = {
       students: finalStudents,
-      attendanceHistory: filteredHistory,
-      attendanceToday: filteredToday,
-      scanLogTimes: filteredScanTimes,
+      attendanceHistory: effectiveHistory,
+      attendanceToday: effectiveToday,
+      scanLogTimes: effectiveScanTimes,
       payments: mergedPayments,
-      scanLogOrder: initialScanOrder,
+      scanLogOrder: effectiveScanOrder,
       usersList: finalUsersList,
       groupPrices: { ...DEFAULT_GRADE_PRICES, ...backupPrices, ...(parsed.groupPrices || {}) },
       activeSessionSlotId: parsed.activeSessionSlotId || "auto",
@@ -582,9 +603,13 @@ export function loadLocalData(): SystemData {
       deletedBarcodes: deletedBarcodesList,
       deletedPaymentKeys: deletedPaymentKeysList,
       deletedAttendanceKeys: deletedAttendanceKeysList,
+      attendanceWipedAt: ATTENDANCE_SYSTEM_WIPE_EPOCH,
       scanLogUpdatedAt: parseTimestamp(parsed.scanLogUpdatedAt) || 0,
       updatedAt: parseTimestamp(parsed.updatedAt) || Date.now(),
     };
+    if (!isWiped) {
+      saveToLocalStorage(loaded, false);
+    }
     memoryCachedData = loaded;
     return loaded;
   } catch (e) {
@@ -1589,9 +1614,22 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   const mergedStudents = Array.from(studentMap.values());
 
   // 2. Merge Attendance History & Today
+  const isCloudWiped = Boolean(cloud.attendanceWipedAt && cloud.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
+  const isLocalWiped = Boolean(local.attendanceWipedAt && local.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
+
+  // Enforce points = 0 on all students and reset attendance counters if wiped
+  mergedStudents.forEach((s) => {
+    s.points = 0;
+    if (isCloudWiped && Object.keys(cloud.attendanceHistory || {}).length === 0) {
+      s.totalAttendanceDays = 0;
+      s.totalAbsentDays = 0;
+    }
+  });
+
   const mergedHistory: Record<string, Record<string, string>> = {};
 
-  if (local.attendanceHistory) {
+  // If cloud wiped attendance, do NOT inherit old unwiped local history
+  if (local.attendanceHistory && (!isCloudWiped || isLocalWiped)) {
     for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
       if (dateKey === "2026-09-23" || dateKey === "2026-09-22" || (dayMap && Object.keys(dayMap).length > 200)) {
         continue;
@@ -1864,6 +1902,7 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     deletedBarcodes,
     deletedPaymentKeys,
     deletedAttendanceKeys,
+    attendanceWipedAt: Math.max(local.attendanceWipedAt || 0, cloud.attendanceWipedAt || 0, isCloudWiped ? ATTENDANCE_SYSTEM_WIPE_EPOCH : 0),
     scanLogUpdatedAt: Math.max(localScanTime, cloudScanTime),
     updatedAt: Math.max(localTime, cloudTime),
   };

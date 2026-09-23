@@ -94,7 +94,7 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
     const targetPhone = student.parentPhone || student.phone || "";
     const msg =
       customMessage ||
-      `تعديل وتحديث رصد درجة اختبار الرياضيات 📐\n\nالسادة أولياء الأمور الكرام،\nتم تعديل وتحديث رصد درجة الاختبار لدى الأستاذة إيمان الدمشيتي:\n\n🔹 اسم الطالب/ة: ${student.name}\n📚 الصف: ${student.groupGrade}\n📝 موضوع الاختبار: ${examTitle}\n📊 الدرجة بعد التعديل: ${scoreFormatted}\n⭐ إجمالي نقاط الطالب: ${newPoints}\n\nمع تحيات ميس إيمان الدمشيتي 📐`;
+      `تعديل وتحديث رصد درجة اختبار الرياضيات 📐\n\nالسادة أولياء الأمور الكرام،\nتم تعديل وتحديث رصد درجة الاختبار لدى الأستاذة إيمان الدمشيتي:\n\n🔹 اسم الطالب/ة: ${student.name}\n📚 الصف: ${student.groupGrade}\n📝 موضوع الاختبار: ${examTitle}\n📊 الدرجة بعد التعديل: ${scoreFormatted}\n\nمع تحيات ميس إيمان الدمشيتي 📐`;
 
     // Direct Platform Notification sent to Firebase platform_messages & notifications collections
     enqueuePlatformMessage({
@@ -135,8 +135,7 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
       const last = updatedExams[updatedExams.length - 1];
       const lastTitle = last ? last.examTitle : "";
       const lastScore = last ? `${last.score}/${last.maxScore} (${last.percentage}%)` : "";
-      const newPoints = (student?.points || 0) + pointsDelta;
-      onUpdateGradeRecord(barcode, lastTitle, lastScore, newPoints, updatedScores);
+      onUpdateGradeRecord(barcode, lastTitle, lastScore, 0, updatedScores);
     }
 
     setFeedback({
@@ -236,14 +235,13 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
                 <th className="p-3.5 text-center">متوسط الدرجات</th>
                 <th className="p-3.5 text-center">نسبة الحضور</th>
                 <th className="p-3.5 text-center">نسبة الغياب</th>
-                <th className="p-3.5 text-center">النقاط ⭐</th>
                 <th className="p-3.5 text-center">إجراءات</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-indigo-500/10 font-medium">
               {filteredStudents.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="p-8 text-center text-slate-400 italic">
+                  <td colSpan={10} className="p-8 text-center text-slate-400 italic">
                     {searchQuery ? `لا توجد نتائج مطابقة لـ "${searchQuery}"` : "لا يوجد طلاب مطابقين للبحث."}
                   </td>
                 </tr>
@@ -307,12 +305,6 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
                           {absRate}%
                         </span>
                       </td>
-                      <td className="p-3.5 font-black text-amber-300 text-center">
-                        <span className="inline-flex items-center gap-1 font-mono">
-                          <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                          {student.points || 0}
-                        </span>
-                      </td>
                       <td className="p-3.5 text-center">
                         <div className="flex items-center justify-center gap-1.5">
                           <button
@@ -340,7 +332,7 @@ export const CumulativeGradesReport: React.FC<CumulativeGradesReportProps> = ({
                             onClick={() => {
                               const reportMsg = `تقرير مستوى الطالب/ة: (${student.name})\nالصف: ${student.groupGrade}\nعدد الامتحانات المؤداة: ${examsCount}\nنسبة الحضور: ${attRate}%\nمتوسط درجات الامتحانات: ${examAvg}%\nآخر اختبار: ${
                                 student.lastExamScore || "لا يوجد"
-                              }\nإجمالي النقاط: ${student.points || 0} ⭐\nمع تحيات ميس إيمان الدمشيتي 📐`;
+                              }\nمع تحيات ميس إيمان الدمشيتي 📐`;
                               openWhatsApp(student.parentPhone || student.phone || "", reportMsg);
                             }}
                             className="px-2.5 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold cursor-pointer transition-all"

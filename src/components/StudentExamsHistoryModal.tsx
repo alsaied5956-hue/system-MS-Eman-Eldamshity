@@ -302,8 +302,7 @@ export const StudentExamsHistoryModal: React.FC<StudentExamsHistoryModalProps> =
     report += `🔹 اسم الطالب/ة: ${student.name}\n`;
     report += `📚 الصف الدراسي: ${student.groupGrade}\n`;
     report += `📝 إجمالي الامتحانات المؤداة: ${stats.count} امتحان\n`;
-    report += `📈 متوسط الدرجات العام: ${stats.avg}%\n`;
-    report += `⭐ نقاط التميز: ${student.points || 0} نقطة\n\n`;
+    report += `📈 متوسط الدرجات العام: ${stats.avg}%\n\n`;
     report += `═════════════════════\n`;
     report += `سجل الاختبارات والنتائج:\n`;
 
@@ -382,10 +381,6 @@ export const StudentExamsHistoryModal: React.FC<StudentExamsHistoryModalProps> =
           <div class="stat-box">
             <div class="val">${stats.highest}%</div>
             <div class="lbl">أعلى نسبة محققة</div>
-          </div>
-          <div class="stat-box">
-            <div class="val">${student.points || 0} ⭐</div>
-            <div class="lbl">إجمالي النقاط</div>
           </div>
         </div>
 
@@ -512,7 +507,7 @@ export const StudentExamsHistoryModal: React.FC<StudentExamsHistoryModalProps> =
         </div>
 
         {/* Stats Row */}
-        <div className="p-4 md:px-6 bg-slate-900/40 border-b border-indigo-500/10 grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+        <div className="p-4 md:px-6 bg-slate-900/40 border-b border-indigo-500/10 grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="bg-[#0f172a] p-3 rounded-2xl border border-indigo-500/20 text-center">
             <span className="text-[11px] text-slate-400 block font-medium">إجمالي الامتحانات</span>
             <span className="text-xl font-black text-amber-300 font-mono mt-0.5 block">
@@ -546,14 +541,6 @@ export const StudentExamsHistoryModal: React.FC<StudentExamsHistoryModalProps> =
             <span className="text-[11px] text-slate-400 block font-medium">أدنى نتيجة</span>
             <span className="text-xl font-black text-slate-300 font-mono mt-0.5 block">
               {stats.lowest}%
-            </span>
-          </div>
-
-          <div className="bg-[#0f172a] p-3 rounded-2xl border border-indigo-500/20 text-center col-span-2 sm:col-span-1">
-            <span className="text-[11px] text-slate-400 block font-medium">نقاط التميز ⭐</span>
-            <span className="text-xl font-black text-amber-400 font-mono mt-0.5 flex items-center justify-center gap-1">
-              <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
-              {student.points || 0}
             </span>
           </div>
         </div>

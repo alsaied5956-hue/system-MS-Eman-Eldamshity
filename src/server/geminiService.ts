@@ -351,7 +351,6 @@ export async function analyzeStudentPerformance(params: {
 - المرحلة / الصف الدراسي: ${student.groupGrade}
 - نسبة الحضور الإجمالية: ${attendanceRate}% (أيام الغياب: ${student.totalAbsentDays || 0})
 - متوسط درجات الاختبارات: ${examAvg}% (سجل الدرجات: ${(student.totalExamScores || []).join(", ") || "لا توجد درجات مرصودة"})
-- نقاط التميز والتفوق: ${student.points || 0} نقطة
 - حالة الاشتراك المالي: ${isUnpaid ? "غير مسدد حتى الآن" : "مسدد بالكامل"}
 - ملاحظات المعلمة المسجلة: ${student.notes || notes || "لا توجد"}
 

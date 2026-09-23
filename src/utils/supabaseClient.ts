@@ -1478,7 +1478,7 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
         groupDays: row.group_days || "سبت - إثنين - أربعاء",
         customMonthlyFee: Number(row.monthly_fee) || undefined,
         discountReason: row.notes || undefined,
-        points: (counts?.present || 0) * 10,
+        points: 0,
         totalAttendanceDays: counts?.present || 0,
         totalAbsentDays: counts?.absent || 0,
         totalExamScores: examInfo?.scores || [],

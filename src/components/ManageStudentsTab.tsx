@@ -235,7 +235,6 @@ export const ManageStudentsTab: React.FC<ManageStudentsTabProps> = ({
                 <th className="p-3.5">المجموعة</th>
                 <th className="p-3.5">الاشتراك المحدد</th>
                 <th className="p-3.5">رقم ولي الأمر</th>
-                <th className="p-3.5">النقاط ⭐</th>
                 <th className="p-3.5">متوسط الدرجات</th>
                 <th className="p-3.5 text-center">إجراءات التحكم</th>
               </tr>
@@ -243,7 +242,7 @@ export const ManageStudentsTab: React.FC<ManageStudentsTabProps> = ({
             <tbody className="divide-y divide-slate-800/60 font-medium">
               {sortedStudents.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="p-8 text-center text-slate-400 italic">
+                  <td colSpan={9} className="p-8 text-center text-slate-400 italic">
                     {searchQuery ? `لا توجد نتائج مطابقة لـ "${searchQuery}"` : "لا يوجد طلاب مطابقين للبحث."}
                   </td>
                 </tr>
@@ -272,7 +271,6 @@ export const ManageStudentsTab: React.FC<ManageStudentsTabProps> = ({
                         </span>
                       </td>
                       <td className="p-3.5 font-mono text-slate-300">{student.parentPhone}</td>
-                      <td className="p-3.5 font-bold text-amber-300 font-mono">{student.points || 0}</td>
                       <td className="p-3.5 font-bold text-emerald-400 font-mono">{examAvg}%</td>
                       <td className="p-3.5">
                         <div className="flex items-center justify-center gap-2">

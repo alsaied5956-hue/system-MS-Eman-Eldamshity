@@ -182,7 +182,6 @@ export function exportStudentsToExcel(students: Student[], fileName = `قائم�
     "رقم ولي الأمر": s.parentPhone,
     "الاشتراك الشهري (ج.م)": s.customMonthlyFee ?? "السعر الافتراضي",
     "سبب الخصم / الملاحظات": s.discountReason || "-",
-    "إجمالي النقاط ⭐": s.points || 0,
     "نسبة الحضور": `${getAttendanceRate(s)}%`,
     "نسبة الغياب": `${getAbsenceRate(s)}%`,
     "متوسط درجات الامتحانات": `${getExamAverage(s)}%`,
@@ -211,7 +210,6 @@ export function exportAllExamsToExcel(students: Student[], fileName = `سجل_ا
     "النتيجة / الدرجة": s.lastExamScore || "لا يوجد",
     "متوسط كافة الامتحانات": `${getExamAverage(s)}%`,
     "عدد الامتحانات المؤداة": s.totalExamScores?.length || 0,
-    "النقاط ⭐": s.points || 0,
     "رقم ولي الأمر": s.parentPhone,
   }));
 

@@ -96,8 +96,6 @@ export function generateAllStudentPlatformNotifications(
     else if (avg < 90) gradeRating = "جيد جداً";
 
     cumulativeScore = `${avg}% (${gradeRating})`;
-  } else if (student.points) {
-    cumulativeScore = `${student.points} نقطة تفوق`;
   }
 
   // 3. Attendance Today

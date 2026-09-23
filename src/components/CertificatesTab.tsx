@@ -36,7 +36,7 @@ export const CertificatesTab: React.FC<CertificatesTabProps> = ({ students }) =>
         s.lastExamScore?.includes("النهائية") ||
         (s.totalExamScores && s.totalExamScores.some((score) => score >= 90));
 
-      return hasFinalMark || (s.points && s.points >= 40);
+      return Boolean(hasFinalMark);
     });
 
     if (searchQuery.trim()) {
@@ -221,8 +221,8 @@ export const CertificatesTab: React.FC<CertificatesTabProps> = ({ students }) =>
                     #{student.barcode}
                   </span>
                   <span className="text-xs font-black text-amber-300 flex items-center gap-1">
-                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
-                    {student.points || 0} نقطة
+                    <Trophy className="w-3.5 h-3.5 text-amber-400" />
+                    تفوق أكاديمي
                   </span>
                 </div>
 

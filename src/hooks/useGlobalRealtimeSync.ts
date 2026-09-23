@@ -514,13 +514,12 @@ export function useGlobalRealtimeSync({
             const next = prev.map((s) => {
               if (s.barcode === targetStudent.barcode) {
                 const scores = s.totalExamScores ? [...s.totalExamScores, pct] : [pct];
-                const pointsBonus = pct === 100 ? 20 : pct >= 90 ? 10 : pct >= 75 ? 5 : 0;
                 return {
                   ...s,
                   lastExamTitle: newRow.title,
                   lastExamScore: scoreFormatted,
                   totalExamScores: scores,
-                  points: (s.points || 0) + pointsBonus,
+                  points: 0,
                 };
               }
               return s;

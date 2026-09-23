@@ -40,7 +40,6 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
   const [examTitle, setExamTitle] = useState("");
   const [maxScore, setMaxScore] = useState<number>(10);
   const [studentScore, setStudentScore] = useState<number | "">("");
-  const [pointsBonus, setPointsBonus] = useState<number>(0);
   const [shouldOpenWhatsApp, setShouldOpenWhatsApp] = useState<boolean>(false);
   const [customMsgText, setCustomMsgText] = useState<string>("");
   const [isCustomMsgEdited, setIsCustomMsgEdited] = useState<boolean>(false);
@@ -75,7 +74,6 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
 
       setMaxScore(parsedMax);
       setStudentScore(parsedScore);
-      setPointsBonus(0);
       setShouldOpenWhatsApp(false);
       setIsCustomMsgEdited(false);
       setErrorMsg(null);
@@ -118,10 +116,9 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
     if (!student) return "";
     const title = examTitle.trim() || "التقييم الأول";
     const scoreText = studentScore !== "" ? `${studentScore} من ${maxScore} (${percentage}%)` : "لم ترصد";
-    const totalPts = (student.points || 0) + (pointsBonus || 0);
 
-    return `تعديل وتحديث رصد درجة اختبار الرياضيات 📐\n\nالسادة أولياء الأمور الكرام،\nتم تعديل وتحديث رصد درجة الاختبار لدى الأستاذة إيمان الدمشيتي:\n\n🔹 اسم الطالب/ة: ${student?.name || ""}\n📚 الصف الدراسي: ${student?.groupGrade || ""}\n📝 موضوع الاختبار: ${title}\n📊 الدرجة بعد التعديل: ${scoreText}\n🌟 التقييم: ${evaluationInfo.text}\n⭐ إجمالي نقاط الطالب: ${totalPts}\n\nشاكرين حرصكم ومتابعتكم المستمرة ✨\nمع تحيات ميس إيمان الدمشيتي 📐`;
-  }, [student, examTitle, studentScore, maxScore, percentage, evaluationInfo, pointsBonus]);
+    return `تعديل وتحديث رصد درجة اختبار الرياضيات 📐\n\nالسادة أولياء الأمور الكرام،\nتم تعديل وتحديث رصد درجة الاختبار لدى الأستاذة إيمان الدمشيتي:\n\n🔹 اسم الطالب/ة: ${student?.name || ""}\n📚 الصف الدراسي: ${student?.groupGrade || ""}\n📝 موضوع الاختبار: ${title}\n📊 الدرجة بعد التعديل: ${scoreText}\n🌟 التقييم: ${evaluationInfo.text}\n\nشاكرين حرصكم ومتابعتكم المستمرة ✨\nمع تحيات ميس إيمان الدمشيتي 📐`;
+  }, [student, examTitle, studentScore, maxScore, percentage, evaluationInfo]);
 
   const activeMsg = isCustomMsgEdited ? customMsgText : generatedWhatsAppMsg;
 
@@ -159,7 +156,7 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
       examTitle.trim() || "التقييم الأول",
       s,
       m,
-      (student.points || 0) + (pointsBonus || 0),
+      0,
       openChat,
       finalMsg
     );
@@ -332,26 +329,6 @@ export const EditGradeModal: React.FC<EditGradeModalProps> = ({
               </div>
             </div>
           )}
-
-          {/* Points Bonus adjustment */}
-          <div className="flex items-center justify-between p-3 rounded-2xl bg-indigo-950/20 border border-indigo-500/20">
-            <div className="flex items-center gap-2">
-              <Star className="w-4 h-4 text-amber-400 fill-amber-400" />
-              <span className="text-slate-300 font-bold">إجمالي نقاط الطالب الحالية:</span>
-              <span className="font-mono text-amber-300 font-bold">{student.points || 0}</span>
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] text-slate-400 font-medium">تعديل النقاط:</span>
-              <input
-                type="number"
-                value={pointsBonus}
-                onChange={(e) => setPointsBonus(Number(e.target.value))}
-                className="w-16 bg-[#080d1e] border border-amber-500/30 text-amber-300 font-mono font-bold px-2 py-1 rounded-xl text-center text-xs outline-none"
-                placeholder="0"
-              />
-            </div>
-          </div>
 
           {/* WhatsApp Direct Chat Setup */}
           <div className="space-y-2 pt-2 border-t border-indigo-500/20">
