@@ -228,12 +228,11 @@ export const StudentExamsHistoryModal: React.FC<StudentExamsHistoryModalProps> =
         notes: formNotes.trim() || undefined,
       };
       updated = [...examsList, newRecord];
-      bonusPoints = percentage === 100 ? 20 : percentage >= 90 ? 10 : percentage >= 75 ? 5 : 0;
-      showToast(`🎉 تم رصد الامتحان بنجاح وحفظه في سجل الطالب (+${bonusPoints} نقطة)`);
+      showToast(`🎉 تم رصد الامتحان بنجاح وحفظه في سجل الطالب`);
     }
 
     setExamsList(updated);
-    onSaveExams(student.barcode, updated, bonusPoints);
+    onSaveExams(student.barcode, updated, 0);
     playBeep("success");
     setIsFormOpen(false);
 
