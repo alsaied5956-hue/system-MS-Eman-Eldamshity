@@ -29,7 +29,7 @@ const ENTRY_EXIT_LOGS_FILE = path.join(SYNC_DATA_DIR, "center_entry_exit_logs.js
 // -------------------------------------------------------------
 // FIRESTORE SERVER QUOTA & RPC ERROR SUPPRESSION ENGINE
 // -------------------------------------------------------------
-let serverFirestoreQuotaExceededUntil: number = Date.now() + 12 * 60 * 60 * 1000;
+let serverFirestoreQuotaExceededUntil: number = 0;
 
 export function isFirestoreQuotaError(err: any): boolean {
   if (!err) return false;
@@ -736,10 +736,71 @@ async function startServer() {
         ...(data.scanLogTimes || {}),
       };
 
+      // 2. Merge attendanceHistory deeply across all historical dates
+      const mergedHistory: Record<string, Record<string, string>> = {
+        ...(cachedServerState.attendanceHistory || {}),
+      };
+      if (data.attendanceHistory && typeof data.attendanceHistory === "object") {
+        for (const [dKey, dayMap] of Object.entries(data.attendanceHistory)) {
+          if (dayMap && typeof dayMap === "object") {
+            mergedHistory[dKey] = {
+              ...(mergedHistory[dKey] || {}),
+              ...(dayMap as Record<string, string>),
+            };
+          }
+        }
+      }
+
+      // 3. Merge payments deeply so a closed device waking up never clears payment records
+      const mergedPayments: Record<string, Record<string, any>> = {
+        ...(cachedServerState.payments || {}),
+      };
+      if (data.payments && typeof data.payments === "object") {
+        for (const [mKey, records] of Object.entries(data.payments)) {
+          if (records && typeof records === "object") {
+            mergedPayments[mKey] = {
+              ...(mergedPayments[mKey] || {}),
+              ...(records as Record<string, any>),
+            };
+          }
+        }
+      }
+
+      // 4. Merge students intelligently (preserve edits, scores, and new additions)
+      const existingStudents = Array.isArray(cachedServerState.students) ? cachedServerState.students : [];
+      const incomingStudents = Array.isArray(data.students) ? data.students : [];
+      const studentMap = new Map<string, any>();
+      existingStudents.forEach((s: any) => {
+        if (s?.barcode) studentMap.set(String(s.barcode).trim(), s);
+      });
+      incomingStudents.forEach((s: any) => {
+        if (!s?.barcode) return;
+        const b = String(s.barcode).trim();
+        const prev = studentMap.get(b);
+        if (!prev) {
+          studentMap.set(b, s);
+        } else {
+          studentMap.set(b, {
+            ...prev,
+            ...s,
+            totalExamScores: (s.totalExamScores?.length || 0) >= (prev.totalExamScores?.length || 0)
+              ? s.totalExamScores
+              : prev.totalExamScores,
+            examHistory: (s.examHistory?.length || 0) >= (prev.examHistory?.length || 0)
+              ? s.examHistory
+              : prev.examHistory,
+          });
+        }
+      });
+      const mergedStudents = Array.from(studentMap.values());
+
       stateToSave = {
         ...cachedServerState,
         ...data,
+        students: mergedStudents,
+        payments: mergedPayments,
         attendanceToday: mergedToday,
+        attendanceHistory: mergedHistory,
         scanLogOrder: combinedOrder,
         scanLogTimes: combinedScanTimes,
       };

@@ -266,12 +266,8 @@ export default function App() {
         const authoritativeList = res.students as Student[];
         setStudents(authoritativeList);
         appStudentsRef.current = authoritativeList;
-        // Purge any locally stored deleted students to keep disk cache strictly in sync
+        // Save authoritative students locally without overwriting the cloud with stale local attendance
         saveStudentsData(authoritativeList);
-        syncDataToCloud({
-          ...loadLocalData(),
-          students: authoritativeList,
-        });
 
         if (res.attendanceToday && Object.keys(res.attendanceToday).length > 0) {
           setAttendanceToday((prev) => {
@@ -452,14 +448,32 @@ export default function App() {
 
           setStudents((prev) => {
             const cleanPrev = prev.filter((s) => !allDel.has(String(s.barcode).trim()));
-            const prevBarcodes = new Set(cleanPrev.map((s) => String(s.barcode).trim()));
-            const toAdd = d.students.filter(
-              (s: any) => s && s.barcode && !allDel.has(String(s.barcode).trim()) && !prevBarcodes.has(String(s.barcode).trim())
-            );
-            if (toAdd.length === 0 && cleanPrev.length === prev.length) {
-              return prev;
-            }
-            const next = [...cleanPrev, ...toAdd];
+            const prevMap = new Map<string, Student>();
+            cleanPrev.forEach((s) => prevMap.set(String(s.barcode).trim(), s));
+
+            d.students.forEach((remoteS: any) => {
+              if (!remoteS || !remoteS.barcode) return;
+              const cleanB = String(remoteS.barcode).trim();
+              if (allDel.has(cleanB)) return;
+              const existing = prevMap.get(cleanB);
+              if (!existing) {
+                prevMap.set(cleanB, remoteS);
+              } else {
+                // Merge student details so edits to existing students propagate seamlessly
+                prevMap.set(cleanB, {
+                  ...existing,
+                  ...remoteS,
+                  totalExamScores: (remoteS.totalExamScores?.length || 0) >= (existing.totalExamScores?.length || 0)
+                    ? remoteS.totalExamScores
+                    : existing.totalExamScores,
+                  examHistory: (remoteS.examHistory?.length || 0) >= (existing.examHistory?.length || 0)
+                    ? remoteS.examHistory
+                    : existing.examHistory,
+                });
+              }
+            });
+
+            const next = Array.from(prevMap.values());
             appStudentsRef.current = next;
             return next;
           });

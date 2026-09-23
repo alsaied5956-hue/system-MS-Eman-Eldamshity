@@ -521,8 +521,8 @@ export function loadLocalData(): SystemData {
     const filteredHistory: Record<string, Record<string, string>> = {};
     for (const [dKey, dayMap] of Object.entries(rawHistory)) {
       if (!dayMap) continue;
-      // Skip bulk mock simulated entries (> 200 entries on a single date) and fake dates
-      if (dKey === "2026-09-23" || dKey === "2026-09-22" || Object.keys(dayMap).length > 200) {
+      // Skip bulk mock simulated entries (> 200 entries on a single date)
+      if (Object.keys(dayMap).length > 200) {
         continue;
       }
       for (const [bCode, status] of Object.entries(dayMap)) {
@@ -1631,7 +1631,7 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   // If cloud wiped attendance, do NOT inherit old unwiped local history
   if (local.attendanceHistory && (!isCloudWiped || isLocalWiped)) {
     for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
-      if (dateKey === "2026-09-23" || dateKey === "2026-09-22" || (dayMap && Object.keys(dayMap).length > 200)) {
+      if (dayMap && Object.keys(dayMap).length > 200) {
         continue;
       }
       mergedHistory[dateKey] = { ...(dayMap || {}) };
@@ -1640,7 +1640,7 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
 
   if (cloud.attendanceHistory) {
     for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
-      if (dateKey === "2026-09-23" || dateKey === "2026-09-22" || (remoteDayMap && Object.keys(remoteDayMap).length > 200)) {
+      if (remoteDayMap && Object.keys(remoteDayMap).length > 200) {
         continue;
       }
       if (!mergedHistory[dateKey]) {

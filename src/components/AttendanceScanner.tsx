@@ -627,16 +627,32 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     }
   };
 
-  // حالة نافذة تأكيد إرسال الغياب للكل (Confirmation Modal)
+  // حالة نافذة تأكيد إرسال الغياب للكل (Confirmation Modal - 3 قوائم: غياب، تأخير، تعويض)
   const [absenceConfirmData, setAbsenceConfirmData] = useState<{
     grade: GradeName;
     days: GroupDays;
     absentList: { student: Student; message: string; type: "غائب" }[];
-    lateList: { student: Student; message: string; type: "تأخير" }[];
-    crossDayList: { student: Student; message: string; type: "عكس_أيام" }[];
+    lateList: { student: Student; message: string; type: "تأخير"; timeStr?: string }[];
+    crossDayList: {
+      student: Student;
+      message: string;
+      type: "عكس_أيام";
+      subType: "attended_today_compensation" | "exempt_attended_alternate";
+      timeStr?: string;
+      originalGroup?: string;
+      alternateDate?: string;
+    }[];
+    compensatedExemptList?: {
+      student: Student;
+      message: string;
+      type: "عكس_أيام";
+      subType: "exempt_attended_alternate";
+      alternateDate: string;
+    }[];
     presentCount: number;
     totalStudents: number;
   } | null>(null);
+  const [absenceModalTab, setAbsenceModalTab] = useState<"absent" | "late" | "compensation">("absent");
   const [absenceSearchQuery, setAbsenceSearchQuery] = useState("");
 
   // Success Notification after finishing group
@@ -1229,9 +1245,23 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     }
 
     const absentList: { student: Student; message: string; type: "غائب" }[] = [];
-    const lateList: { student: Student; message: string; type: "تأخير" }[] = [];
-    const crossDayList: { student: Student; message: string; type: "عكس_أيام" }[] = [];
-    const compensatedExemptList: { student: Student; alternateDate: string }[] = [];
+    const lateList: { student: Student; message: string; type: "تأخير"; timeStr?: string }[] = [];
+    const crossDayList: {
+      student: Student;
+      message: string;
+      type: "عكس_أيام";
+      subType: "attended_today_compensation" | "exempt_attended_alternate";
+      timeStr?: string;
+      originalGroup?: string;
+      alternateDate?: string;
+    }[] = [];
+    const compensatedExemptList: {
+      student: Student;
+      message: string;
+      type: "عكس_أيام";
+      subType: "exempt_attended_alternate";
+      alternateDate: string;
+    }[] = [];
     let presentCount = 0;
 
     const todayKey = getTodayKey();
@@ -1255,9 +1285,18 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
           (history?.[pairedAltKey]?.[bCode] === "حضور" || history?.[pairedAltKey]?.[bCode] === "تأخير");
 
         if (attendedAlternate) {
+          const altMsg =
+            `تنبيه من منظومة الأستاذة إيمان الدمشيتي 📐\n` +
+            `نفيدكم بعلم أن الطالب/ة: (${student.name})\n` +
+            `المقيد في الصف: [${student.groupGrade}] - مجموعة: [${student.groupDays}]\n` +
+            `معفي من غياب اليوم (${new Date().toLocaleDateString("ar-EG")}) نظراً لحضوره تعويضياً في موعد الحصة البديلة بتاريخ (${pairedAltKey}).\n` +
+            `تم تأكيد حضوره واحتساب الحصة تعويضياً بنجاح.`;
           compensatedExemptList.push({
             student,
             alternateDate: pairedAltKey,
+            message: altMsg,
+            type: "عكس_أيام",
+            subType: "exempt_attended_alternate",
           });
           return; // تم إعفاؤه وحمايته من الغياب الخاطئ ورسائل الواتساب غير المستحقة
         }
@@ -1285,7 +1324,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
             `المقيد في الصف: [${student.groupGrade}] - مجموعة: [${student.groupDays}]\n` +
             `قد حضر اليوم متأخراً عن الموعد المحدد لحصة الرياضيات${timeStr ? ` في تمام الساعة (${timeStr})` : ""}.\n` +
             `يرجى التنبيه على الالتزام بالحضور في الموعد لبدء الشرح في وقته.`;
-          lateList.push({ student, message: msg, type: "تأخير" });
+          lateList.push({ student, message: msg, type: "تأخير", timeStr });
         } else {
           presentCount++;
         }
@@ -1313,20 +1352,24 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         const msg =
           `تنبيه من منظومة الأستاذة إيمان الدمشيتي 📐\n` +
           `نفيدكم بعلم أن الطالب/ة: (${st.name})\n` +
-          `المقيد في مجموعة: [${st.groupGrade} - ${st.groupDays}]\n` +
-          `قد حضر اليوم في مجموعة تعويض الأيام: [${selectedGrade} - ${selectedDays}]\n` +
+          `المقيد أساساً في مجموعة: [${st.groupGrade} - ${st.groupDays}]\n` +
+          `قد حضر اليوم (${new Date().toLocaleDateString("ar-EG")}) في حصة التعويض لمجموعة: [${selectedGrade} - ${selectedDays}]\n` +
           `حالة التسجيل: (${statusToday})${timeStr ? ` في تمام الساعة (${timeStr})` : ""}.\n` +
-          `تم تسجيل حضوره تعويضياً بنجاح.`;
+          `تم تسجيل حضوره واحتساب الحصة تعويضياً بنجاح.`;
 
         crossDayList.push({
           student: st,
           message: msg,
           type: "عكس_أيام",
+          subType: "attended_today_compensation",
+          timeStr,
+          originalGroup: `${st.groupGrade} - ${st.groupDays}`,
         });
       }
     });
 
-    // فتح نافذة التأكيد الحوارية مع قائمة الغائبين فقط دون إغلاق المجموعة أو إرسال البيانات فوراً
+    // فتح نافذة التأكيد الحوارية مع الـ 3 قوائم
+    setAbsenceModalTab("absent");
     setAbsenceSearchQuery("");
     setAbsenceConfirmData({
       grade: selectedGrade,
@@ -1374,8 +1417,12 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   const handleConfirmAndSendAbsence = async () => {
     if (!absenceConfirmData) return;
 
-    const { grade, days, absentList, lateList, crossDayList, presentCount } = absenceConfirmData;
-    const combinedQueue = [...absentList, ...lateList, ...crossDayList];
+    const { grade, days, absentList, lateList, crossDayList, compensatedExemptList, presentCount } = absenceConfirmData;
+    const combinedCompensation = [
+      ...(crossDayList || []),
+      ...(compensatedExemptList || []),
+    ];
+    const combinedQueue = [...absentList, ...lateList, ...combinedCompensation];
 
     // ⚡ Optimistic UI: Snapshot current queue & clear instantly
     const previousQueue = [...scannerQueue];
@@ -1403,7 +1450,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                 ? `إشعار غياب - ${item.student.name}`
                 : item.type === "تأخير"
                 ? `إشعار تأخير - ${item.student.name}`
-                : `إشعار تعويض أيام - ${item.student.name}`,
+                : `إشعار تعويض - ${item.student.name}`,
             message: item.message,
             channel: "in_app",
           }))
@@ -1418,7 +1465,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       present: presentCount,
       late: lateList.length,
       absent: absentList.length,
-      crossDay: crossDayList.length,
+      crossDay: combinedCompensation.length,
       queueItems: combinedQueue as any,
     });
     setScanAlert(null);
@@ -1429,7 +1476,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     // 3. Save to Supabase and handle network errors with rollback & error toast
     try {
       if (onFinishGroup) {
-        await onFinishGroup(grade, days, absentList, lateList, crossDayList);
+        await onFinishGroup(grade, days, absentList, lateList, combinedCompensation);
       }
     } catch (err: any) {
       console.error("[AttendanceScanner] Error saving group attendance:", err);
@@ -2568,240 +2615,516 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         </div>
       )}
 
-      {/* Confirmation Modal - مراجعة وتأكيد إرسال الغياب للكل وعرض الغائبين فقط */}
-      {absenceConfirmData && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto font-tajawal">
-          <div className="bg-[#0b1224] border-2 border-rose-500/50 w-full max-w-2xl rounded-3xl p-5 sm:p-6 shadow-2xl shadow-rose-950/60 space-y-4 animate-in fade-in zoom-in-95 my-auto max-h-[92vh] flex flex-col">
-            {/* Modal Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-rose-500/20 shrink-0">
-              <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0 shadow-lg shadow-rose-950/50">
-                  <UserX className="w-6 h-6" />
+      {/* Confirmation Modal - مراجعة وتأكيد إرسال الغياب للكل وعرض الـ 3 قوائم (غياب، تأخير، تعويض) */}
+      {absenceConfirmData && (() => {
+        const totalCompensation = [
+          ...(absenceConfirmData.crossDayList || []),
+          ...(absenceConfirmData.compensatedExemptList || []),
+        ];
+        const totalNotifications =
+          absenceConfirmData.absentList.length +
+          absenceConfirmData.lateList.length +
+          totalCompensation.length;
+
+        return (
+          <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto font-tajawal">
+            <div className="bg-[#0b1224] border-2 border-indigo-500/40 w-full max-w-3xl rounded-3xl p-5 sm:p-6 shadow-2xl shadow-indigo-950/60 space-y-4 animate-in fade-in zoom-in-95 my-auto max-h-[94vh] flex flex-col">
+              {/* Modal Header */}
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800 shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-indigo-500/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400 shrink-0 shadow-lg shadow-indigo-950/50">
+                    <Users className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-black text-white font-fancy flex items-center gap-2">
+                      <span>مراجعة واعتماد كشف الحصة والغياب</span>
+                      <span className="text-xs bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 px-2.5 py-0.5 rounded-full font-bold">
+                        {totalNotifications} إشعار للمراجعة
+                      </span>
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      الصف: <strong className="text-amber-300">{absenceConfirmData.grade}</strong> • مجموعة: <strong className="text-indigo-300">{absenceConfirmData.days}</strong>
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-base sm:text-lg font-black text-rose-300 font-fancy flex items-center gap-2">
-                    <span>مراجعة وتأكيد حصر الغياب</span>
-                    <span className="text-xs bg-rose-500/20 text-rose-300 border border-rose-500/40 px-2.5 py-0.5 rounded-full font-bold">
-                      {absenceConfirmData.absentList.length} غائب
-                    </span>
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    الصف: <strong className="text-amber-300">{absenceConfirmData.grade}</strong> • مجموعة: <strong className="text-indigo-300">{absenceConfirmData.days}</strong>
-                  </p>
+                <button
+                  type="button"
+                  onClick={handleCancelAbsenceConfirm}
+                  className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                  title="إغلاق والعودة للتعديل"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Quick Metrics Bar (5 Metrics) */}
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-center shrink-0">
+                <div className="bg-slate-900/80 border border-slate-800 p-2.5 rounded-2xl">
+                  <div className="text-[11px] text-slate-400 font-bold">المقيدين بالمجموعة</div>
+                  <div className="text-base font-black text-white">{absenceConfirmData.totalStudents}</div>
+                </div>
+                <div className="bg-emerald-950/40 border border-emerald-500/30 p-2.5 rounded-2xl">
+                  <div className="text-[11px] text-emerald-300 font-bold">حاضرون بالموعد</div>
+                  <div className="text-base font-black text-emerald-400">{absenceConfirmData.presentCount}</div>
+                </div>
+                <div className="bg-amber-950/40 border border-amber-500/30 p-2.5 rounded-2xl">
+                  <div className="text-[11px] text-amber-300 font-bold">متأخرون</div>
+                  <div className="text-base font-black text-amber-400">{absenceConfirmData.lateList.length}</div>
+                </div>
+                <div className="bg-rose-950/50 border border-rose-500/40 p-2.5 rounded-2xl">
+                  <div className="text-[11px] text-rose-300 font-bold">الغياب الفعلي</div>
+                  <div className="text-base font-black text-rose-400">{absenceConfirmData.absentList.length}</div>
+                </div>
+                <div className="bg-cyan-950/40 border border-cyan-500/30 p-2.5 rounded-2xl col-span-2 sm:col-span-1">
+                  <div className="text-[11px] text-cyan-300 font-bold">حضور تعويض</div>
+                  <div className="text-base font-black text-cyan-400">{totalCompensation.length}</div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={handleCancelAbsenceConfirm}
-                className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-                title="إغلاق والعودة للتعديل"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            {/* Quick Metrics Bar */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center shrink-0">
-              <div className="bg-slate-900/80 border border-slate-800 p-2.5 rounded-2xl">
-                <div className="text-[11px] text-slate-400 font-bold">إجمالي المقيدين</div>
-                <div className="text-base font-black text-white">{absenceConfirmData.totalStudents}</div>
-              </div>
-              <div className="bg-emerald-950/40 border border-emerald-500/30 p-2.5 rounded-2xl">
-                <div className="text-[11px] text-emerald-300 font-bold">حاضرون بالطابور</div>
-                <div className="text-base font-black text-emerald-400">{absenceConfirmData.presentCount}</div>
-              </div>
-              <div className="bg-amber-950/40 border border-amber-500/30 p-2.5 rounded-2xl">
-                <div className="text-[11px] text-amber-300 font-bold">متأخرون</div>
-                <div className="text-base font-black text-amber-400">{absenceConfirmData.lateList.length}</div>
-              </div>
-              <div className="bg-rose-950/50 border border-rose-500/40 p-2.5 rounded-2xl">
-                <div className="text-[11px] text-rose-300 font-bold">الغياب المستحق</div>
-                <div className="text-base font-black text-rose-400">{absenceConfirmData.absentList.length}</div>
-              </div>
-            </div>
-
-            {/* Explanatory Notice */}
-            <div className="bg-slate-900/90 border border-indigo-500/30 p-3 rounded-2xl text-xs text-slate-300 flex items-start gap-2.5 shrink-0">
-              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-              <div className="leading-relaxed">
-                <span className="font-bold text-amber-300">ملاحظة التدقيق: </span>
-                الطلاب المعروضون بالأسفل هم فقط الذين <strong className="text-rose-300">لم يمر كارتهم أمام الإسكانر</strong> ولم يدخلوا طابور الحضور. لن يتم إرسال أي بيانات أو إغلاق الحصة حتى تضغط على "تأكيد وإرسال".
-              </div>
-            </div>
-
-            {/* Compensated Exempt Students Banner */}
-            {absenceConfirmData.compensatedExemptList && absenceConfirmData.compensatedExemptList.length > 0 && (
-              <div className="bg-emerald-950/40 border border-emerald-500/40 p-3 rounded-2xl text-xs space-y-1.5 shrink-0">
-                <div className="flex items-center justify-between text-emerald-300 font-bold">
-                  <span className="flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    <span>طلاب معفيون من الغياب اليوم (حضروا في اليوم البديل كتعويض):</span>
+              {/* 3 Interactive Tab Buttons */}
+              <div className="flex items-center gap-1.5 p-1 bg-slate-900/90 border border-slate-800 rounded-2xl shrink-0">
+                {/* Tab 1: الغائبون */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAbsenceModalTab("absent");
+                    setAbsenceSearchQuery("");
+                  }}
+                  className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    absenceModalTab === "absent"
+                      ? "bg-gradient-to-r from-rose-600 to-rose-700 text-white shadow-lg shadow-rose-900/50 border border-rose-400/40"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
+                  }`}
+                >
+                  <UserX className="w-4 h-4 text-rose-300" />
+                  <span>1. الغائبون</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-mono font-black ${
+                    absenceModalTab === "absent" ? "bg-rose-950/70 text-rose-200" : "bg-slate-800 text-slate-300"
+                  }`}>
+                    {absenceConfirmData.absentList.length}
                   </span>
-                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full font-mono font-bold">
-                    {absenceConfirmData.compensatedExemptList.length} طالب
+                </button>
+
+                {/* Tab 2: المتأخرون */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAbsenceModalTab("late");
+                    setAbsenceSearchQuery("");
+                  }}
+                  className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    absenceModalTab === "late"
+                      ? "bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 shadow-lg shadow-amber-900/40 border border-amber-300/50"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
+                  }`}
+                >
+                  <Clock className="w-4 h-4 text-amber-950" />
+                  <span>2. المتأخرون</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-mono font-black ${
+                    absenceModalTab === "late" ? "bg-amber-900/40 text-amber-950" : "bg-slate-800 text-slate-300"
+                  }`}>
+                    {absenceConfirmData.lateList.length}
                   </span>
-                </div>
-                <div className="text-[11px] text-emerald-400/90 flex flex-wrap gap-1.5 pt-0.5">
-                  {absenceConfirmData.compensatedExemptList.map(({ student, alternateDate }) => (
-                    <span key={student.barcode} className="bg-slate-900/80 border border-emerald-500/30 px-2.5 py-1 rounded-xl flex items-center gap-1">
-                      <span>🛡️</span>
-                      <strong>{student.name}</strong>
-                      <span className="text-[10px] text-slate-400">({alternateDate})</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
+                </button>
 
-            {/* Absent Students List Header & Search */}
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2 shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-black text-slate-200">
-                  قائمة الطلاب الغائبين فقط:
-                </span>
-                <span className="text-[11px] font-bold text-slate-400">
-                  ({absenceConfirmData.absentList.length} طالب)
-                </span>
+                {/* Tab 3: حضور التعويض */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAbsenceModalTab("compensation");
+                    setAbsenceSearchQuery("");
+                  }}
+                  className={`flex-1 py-2 px-2.5 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    absenceModalTab === "compensation"
+                      ? "bg-gradient-to-r from-cyan-600 to-blue-600 text-white shadow-lg shadow-cyan-950/50 border border-cyan-300/40"
+                      : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
+                  }`}
+                >
+                  <RefreshCw className="w-4 h-4 text-cyan-300" />
+                  <span>3. حضور التعويض</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[11px] font-mono font-black ${
+                    absenceModalTab === "compensation" ? "bg-cyan-950/70 text-cyan-200" : "bg-slate-800 text-slate-300"
+                  }`}>
+                    {totalCompensation.length}
+                  </span>
+                </button>
               </div>
 
-              {absenceConfirmData.absentList.length > 3 && (
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              {/* Explanatory description banner for active tab */}
+              <div className="bg-slate-900/90 border border-slate-800 p-2.5 rounded-2xl text-xs flex items-center justify-between gap-2 shrink-0">
+                <div className="flex items-center gap-2 text-slate-300">
+                  {absenceModalTab === "absent" && (
+                    <>
+                      <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                      <span>
+                        <strong className="text-rose-300">قائمة الغياب: </strong>
+                        طلاب هذه المجموعة الذين لم يمر كارتهم ولم يعوضوا مسبقاً (يمكنك تحويل أي طالب لحاضر بالزر الأخضر).
+                      </span>
+                    </>
+                  )}
+                  {absenceModalTab === "late" && (
+                    <>
+                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>
+                        <strong className="text-amber-300">قائمة المتأخرين: </strong>
+                        طلاب الحصة الذين حضروا بعد بدء الموعد المحدد، موضحاً بجانب كل طالب وقت وصوله الدقيق.
+                      </span>
+                    </>
+                  )}
+                  {absenceModalTab === "compensation" && (
+                    <>
+                      <RefreshCw className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <span>
+                        <strong className="text-cyan-300">حضور التعويض: </strong>
+                        طلاب حضروا اليوم بدلاً من موعدهم الأصلي (أمس أو غداً)، أو مقيدون عوضوا في اليوم البديل ومعفيون من الغياب.
+                      </span>
+                    </>
+                  )}
+                </div>
+
+                {/* Search box within current tab */}
+                <div className="relative shrink-0">
+                  <Search className="w-3.5 h-3.5 absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                   <input
                     type="text"
                     value={absenceSearchQuery}
                     onChange={(e) => setAbsenceSearchQuery(e.target.value)}
-                    placeholder="بحث في أسماء الغائبين..."
-                    className="w-full sm:w-56 bg-slate-900/90 border border-slate-700 text-white text-xs rounded-xl pr-8 pl-3 py-1.5 outline-none focus:border-rose-400"
+                    placeholder="بحث في القائمة..."
+                    className="w-36 sm:w-48 bg-slate-950 border border-slate-700 text-white text-xs rounded-xl pr-7 pl-2.5 py-1 outline-none focus:border-indigo-400"
                   />
                 </div>
-              )}
-            </div>
+              </div>
 
-            {/* List Body (Scrollable) */}
-            <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[160px] max-h-[300px]">
-              {absenceConfirmData.absentList.length === 0 ? (
-                <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-2xl p-6 text-center text-emerald-300 space-y-2">
-                  <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
-                  <div className="font-black text-sm">🎉 رائع! جميع مقيدي هذه المجموعة حاضرون</div>
-                  <div className="text-xs text-emerald-400/80">
-                    لا يوجد أي طالب غائب اليوم في هذه المجموعة، يمكنك تأكيد الحضور فوراً.
-                  </div>
-                </div>
-              ) : (
-                (() => {
-                  const filtered = absenceConfirmData.absentList.filter((item) => {
-                    if (!absenceSearchQuery.trim()) return true;
-                    const q = absenceSearchQuery.trim().toLowerCase();
-                    return (
-                      item.student.name.toLowerCase().includes(q) ||
-                      String(item.student.barcode).includes(q) ||
-                      (item.student.phone && item.student.phone.includes(q)) ||
-                      (item.student.parentPhone && item.student.parentPhone.includes(q))
-                    );
-                  });
-
-                  if (filtered.length === 0) {
-                    return (
-                      <div className="text-center py-6 text-xs text-slate-400">
-                        لا توجد نتائج مطابقة لبحثك في قائمة الغائبين.
+              {/* Tab 1 Body: قائمة الغائبين */}
+              {absenceModalTab === "absent" && (
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[170px] max-h-[310px]">
+                  {absenceConfirmData.absentList.length === 0 ? (
+                    <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-2xl p-6 text-center text-emerald-300 space-y-2">
+                      <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
+                      <div className="font-black text-sm">🎉 رائع! جميع مقيدي هذه المجموعة حاضرون</div>
+                      <div className="text-xs text-emerald-400/80">
+                        لا يوجد أي طالب غائب اليوم في هذه المجموعة، تم تسجيل الجميع بنجاح.
                       </div>
-                    );
-                  }
+                    </div>
+                  ) : (
+                    (() => {
+                      const q = absenceSearchQuery.trim().toLowerCase();
+                      const filtered = absenceConfirmData.absentList.filter((item) => {
+                        if (!q) return true;
+                        return (
+                          item.student.name.toLowerCase().includes(q) ||
+                          String(item.student.barcode).includes(q) ||
+                          (item.student.phone && item.student.phone.includes(q)) ||
+                          (item.student.parentPhone && item.student.parentPhone.includes(q))
+                        );
+                      });
 
-                  return filtered.map((item, idx) => {
-                    const st = item.student;
-                    return (
-                      <div
-                        key={st.barcode || idx}
-                        className="bg-slate-900/80 hover:bg-slate-800/80 border border-rose-500/20 hover:border-rose-500/40 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-2.5 transition-all shadow-sm"
-                      >
-                        <div className="flex items-center gap-3">
-                          <span className="w-6 h-6 rounded-lg bg-rose-500/20 text-rose-300 font-mono text-xs flex items-center justify-center font-bold">
-                            {idx + 1}
-                          </span>
-                          <div>
-                            <div className="font-bold text-white text-xs sm:text-sm flex items-center gap-2">
-                              <span>{st.name}</span>
-                              <span className="text-[10px] font-mono bg-slate-800 text-amber-300 px-1.5 py-0.5 rounded border border-slate-700">
-                                {st.barcode}
+                      if (filtered.length === 0) {
+                        return (
+                          <div className="text-center py-6 text-xs text-slate-400">
+                            لا توجد نتائج مطابقة لبحثك في قائمة الغائبين.
+                          </div>
+                        );
+                      }
+
+                      return filtered.map((item, idx) => {
+                        const st = item.student;
+                        return (
+                          <div
+                            key={st.barcode || idx}
+                            className="bg-slate-900/80 hover:bg-slate-800/80 border border-rose-500/20 hover:border-rose-500/40 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-2.5 transition-all shadow-sm"
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="w-6 h-6 rounded-lg bg-rose-500/20 text-rose-300 font-mono text-xs flex items-center justify-center font-bold">
+                                {idx + 1}
                               </span>
+                              <div>
+                                <div className="font-bold text-white text-xs sm:text-sm flex items-center gap-2">
+                                  <span>{st.name}</span>
+                                  <span className="text-[10px] font-mono bg-slate-800 text-amber-300 px-1.5 py-0.5 rounded border border-slate-700">
+                                    {st.barcode}
+                                  </span>
+                                  <span className="text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 px-2 py-0.5 rounded-full">
+                                    غائب
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                  {st.parentPhone ? (
+                                    <span className="flex items-center gap-1 font-mono">
+                                      <Phone className="w-3 h-3 text-emerald-400" />
+                                      ولي الأمر: {st.parentPhone}
+                                    </span>
+                                  ) : st.phone ? (
+                                    <span className="flex items-center gap-1 font-mono">
+                                      <Phone className="w-3 h-3 text-slate-400" />
+                                      الطالب: {st.phone}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-500">لا يوجد هاتف مسجل</span>
+                                  )}
+                                </div>
+                              </div>
                             </div>
-                            <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
-                              {st.parentPhone ? (
-                                <span className="flex items-center gap-1 font-mono">
-                                  <Phone className="w-3 h-3 text-emerald-400" />
-                                  ولي الأمر: {st.parentPhone}
-                                </span>
-                              ) : st.phone ? (
-                                <span className="flex items-center gap-1 font-mono">
-                                  <Phone className="w-3 h-3 text-slate-400" />
-                                  الطالب: {st.phone}
-                                </span>
-                              ) : (
-                                <span className="text-slate-500">لا يوجد هاتف مسجل</span>
+
+                            {/* Actions for this absent student */}
+                            <div className="flex items-center gap-2 mr-auto">
+                              {/* Quick Convert to Present */}
+                              <button
+                                type="button"
+                                onClick={() => handleMarkAbsentStudentPresent(st)}
+                                className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                                title="تسجيل حضور هذا الطالب الآن واستبعاده من الغياب"
+                              >
+                                <UserCheck className="w-3.5 h-3.5" />
+                                <span>تحويل لحاضر الآن</span>
+                              </button>
+
+                              {/* Quick WhatsApp message to parent */}
+                              {(st.parentPhone || st.phone) && (
+                                <button
+                                  type="button"
+                                  onClick={() => openWhatsApp(st.parentPhone || st.phone || "", item.message)}
+                                  className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                  title="إرسال رسالة الغياب لولي الأمر عبر واتساب"
+                                >
+                                  <span>📲</span>
+                                  <span>واتساب</span>
+                                </button>
                               )}
                             </div>
                           </div>
-                        </div>
-
-                        {/* Actions for this absent student */}
-                        <div className="flex items-center gap-2 mr-auto">
-                          {/* Quick Convert to Present */}
-                          <button
-                            type="button"
-                            onClick={() => handleMarkAbsentStudentPresent(st)}
-                            className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500 text-emerald-300 hover:text-white border border-emerald-500/30 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-                            title="تسجيل حضور هذا الطالب الآن واستبعاده من الغياب"
-                          >
-                            <UserCheck className="w-3.5 h-3.5" />
-                            <span>تحويل لحاضر الآن</span>
-                          </button>
-
-                          {/* Quick WhatsApp message to parent */}
-                          {st.parentPhone && (
-                            <button
-                              type="button"
-                              onClick={() => openWhatsApp(st.parentPhone, item.message)}
-                              className="p-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition-all cursor-pointer"
-                              title="إرسال إشعار واتساب لولي الأمر"
-                            >
-                              📲
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  });
-                })()
+                        );
+                      });
+                    })()
+                  )}
+                </div>
               )}
-            </div>
 
-            {/* Footer with the 2 MANDATORY options */}
-            <div className="pt-3 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
-              {/* Option 2: إلغاء / العودة للتعديل */}
-              <button
-                type="button"
-                onClick={handleCancelAbsenceConfirm}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-bold text-xs sm:text-sm transition-all cursor-pointer border border-slate-700 flex items-center justify-center gap-2"
-              >
-                <ArrowRight className="w-4 h-4" />
-                <span>إلغاء / العودة للتعديل</span>
-              </button>
+              {/* Tab 2 Body: قائمة المتأخرين */}
+              {absenceModalTab === "late" && (
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[170px] max-h-[310px]">
+                  {absenceConfirmData.lateList.length === 0 ? (
+                    <div className="bg-amber-950/20 border border-amber-500/30 rounded-2xl p-6 text-center text-amber-300 space-y-2">
+                      <Clock className="w-10 h-10 text-amber-400 mx-auto" />
+                      <div className="font-black text-sm">✨ لا يوجد طلاب متأخرون في هذه الحصة</div>
+                      <div className="text-xs text-amber-400/80">
+                        جميع الحاضرين مسجلون في موعد الحصة دون أي تأخير.
+                      </div>
+                    </div>
+                  ) : (
+                    (() => {
+                      const q = absenceSearchQuery.trim().toLowerCase();
+                      const filtered = absenceConfirmData.lateList.filter((item) => {
+                        if (!q) return true;
+                        return (
+                          item.student.name.toLowerCase().includes(q) ||
+                          String(item.student.barcode).includes(q) ||
+                          (item.student.phone && item.student.phone.includes(q)) ||
+                          (item.student.parentPhone && item.student.parentPhone.includes(q))
+                        );
+                      });
 
-              {/* Option 1: تأكيد وإرسال */}
-              <button
-                type="button"
-                onClick={handleConfirmAndSendAbsence}
-                className="w-full sm:w-auto px-6 py-2.5 rounded-2xl bg-gradient-to-r from-rose-600 via-rose-500 to-amber-500 hover:from-rose-500 hover:to-amber-400 text-white font-black text-xs sm:text-sm shadow-xl shadow-rose-600/30 flex items-center justify-center gap-2 transition-all transform hover:scale-[1.02] active:scale-95 cursor-pointer border border-rose-300/40"
-              >
-                <Send className="w-4 h-4" />
-                <span>تأكيد وإرسال ({absenceConfirmData.absentList.length} غائب)</span>
-              </button>
+                      if (filtered.length === 0) {
+                        return (
+                          <div className="text-center py-6 text-xs text-slate-400">
+                            لا توجد نتائج مطابقة لبحثك في قائمة المتأخرين.
+                          </div>
+                        );
+                      }
+
+                      return filtered.map((item, idx) => {
+                        const st = item.student;
+                        return (
+                          <div
+                            key={st.barcode || idx}
+                            className="bg-slate-900/80 hover:bg-slate-800/80 border border-amber-500/20 hover:border-amber-500/40 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-2.5 transition-all shadow-sm"
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-300 font-mono text-xs flex items-center justify-center font-bold">
+                                {idx + 1}
+                              </span>
+                              <div>
+                                <div className="font-bold text-white text-xs sm:text-sm flex items-center gap-2">
+                                  <span>{st.name}</span>
+                                  <span className="text-[10px] font-mono bg-slate-800 text-amber-300 px-1.5 py-0.5 rounded border border-slate-700">
+                                    {st.barcode}
+                                  </span>
+                                  <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                    <Clock className="w-3 h-3 text-amber-400" />
+                                    <span>حضر متأخراً {item.timeStr ? `(${item.timeStr})` : ""}</span>
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                  {st.parentPhone ? (
+                                    <span className="flex items-center gap-1 font-mono">
+                                      <Phone className="w-3 h-3 text-emerald-400" />
+                                      ولي الأمر: {st.parentPhone}
+                                    </span>
+                                  ) : st.phone ? (
+                                    <span className="flex items-center gap-1 font-mono">
+                                      <Phone className="w-3 h-3 text-slate-400" />
+                                      الطالب: {st.phone}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-500">لا يوجد هاتف مسجل</span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* WhatsApp Action */}
+                            <div className="flex items-center gap-2 mr-auto">
+                              {(st.parentPhone || st.phone) && (
+                                <button
+                                  type="button"
+                                  onClick={() => openWhatsApp(st.parentPhone || st.phone || "", item.message)}
+                                  className="px-2.5 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 border border-amber-500/30 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                  title="إرسال تنبيه التأخير لولي الأمر عبر واتساب"
+                                >
+                                  <span>📲</span>
+                                  <span>إشعار تأخير</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      });
+                    })()
+                  )}
+                </div>
+              )}
+
+              {/* Tab 3 Body: قائمة حضور التعويض */}
+              {absenceModalTab === "compensation" && (
+                <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[170px] max-h-[310px]">
+                  {totalCompensation.length === 0 ? (
+                    <div className="bg-cyan-950/20 border border-cyan-500/30 rounded-2xl p-6 text-center text-cyan-300 space-y-2">
+                      <RefreshCw className="w-10 h-10 text-cyan-400 mx-auto" />
+                      <div className="font-black text-sm">ℹ️ لا يوجد طلاب تعويض أو عكس أيام في هذه الحصة</div>
+                      <div className="text-xs text-cyan-400/80">
+                        لم يحضر طلاب من مجموعات أخرى تعويضاً اليوم، كما لا يوجد طلاب معفيون عوضوا في اليوم البديل.
+                      </div>
+                    </div>
+                  ) : (
+                    (() => {
+                      const q = absenceSearchQuery.trim().toLowerCase();
+                      const filtered = totalCompensation.filter((item) => {
+                        if (!q) return true;
+                        return (
+                          item.student.name.toLowerCase().includes(q) ||
+                          String(item.student.barcode).includes(q) ||
+                          (item.student.phone && item.student.phone.includes(q)) ||
+                          (item.student.parentPhone && item.student.parentPhone.includes(q)) ||
+                          (item.originalGroup && item.originalGroup.toLowerCase().includes(q))
+                        );
+                      });
+
+                      if (filtered.length === 0) {
+                        return (
+                          <div className="text-center py-6 text-xs text-slate-400">
+                            لا توجد نتائج مطابقة لبحثك في قائمة حضور التعويض.
+                          </div>
+                        );
+                      }
+
+                      return filtered.map((item, idx) => {
+                        const st = item.student;
+                        const isAttendedToday = item.subType === "attended_today_compensation";
+
+                        return (
+                          <div
+                            key={st.barcode || idx}
+                            className="bg-slate-900/80 hover:bg-slate-800/80 border border-cyan-500/20 hover:border-cyan-500/40 p-3 rounded-2xl flex flex-wrap items-center justify-between gap-2.5 transition-all shadow-sm"
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="w-6 h-6 rounded-lg bg-cyan-500/20 text-cyan-300 font-mono text-xs flex items-center justify-center font-bold">
+                                {idx + 1}
+                              </span>
+                              <div>
+                                <div className="font-bold text-white text-xs sm:text-sm flex flex-wrap items-center gap-2">
+                                  <span>{st.name}</span>
+                                  <span className="text-[10px] font-mono bg-slate-800 text-amber-300 px-1.5 py-0.5 rounded border border-slate-700">
+                                    {st.barcode}
+                                  </span>
+                                  {isAttendedToday ? (
+                                    <span className="text-[10px] font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                      <span>🔄</span>
+                                      <span>حضر اليوم تعويضاً (أصله: {item.originalGroup || `${st.groupGrade} - ${st.groupDays}`})</span>
+                                      {item.timeStr && <span>• {item.timeStr}</span>}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                      <span>🛡️</span>
+                                      <span>عوض باليوم البديل ({item.alternateDate}) - معفي من غياب اليوم</span>
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                  {st.parentPhone ? (
+                                    <span className="flex items-center gap-1 font-mono">
+                                      <Phone className="w-3 h-3 text-emerald-400" />
+                                      ولي الأمر: {st.parentPhone}
+                                    </span>
+                                  ) : st.phone ? (
+                                    <span className="flex items-center gap-1 font-mono">
+                                      <Phone className="w-3 h-3 text-slate-400" />
+                                      الطالب: {st.phone}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-500">لا يوجد هاتف مسجل</span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* WhatsApp Action */}
+                            <div className="flex items-center gap-2 mr-auto">
+                              {(st.parentPhone || st.phone) && (
+                                <button
+                                  type="button"
+                                  onClick={() => openWhatsApp(st.parentPhone || st.phone || "", item.message)}
+                                  className="px-2.5 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500 text-cyan-300 hover:text-white border border-cyan-500/30 text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                  title="إرسال رسالة تأكيد التعويض لولي الأمر عبر واتساب"
+                                >
+                                  <span>📲</span>
+                                  <span>إشعار تعويض</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      });
+                    })()
+                  )}
+                </div>
+              )}
+
+              {/* Modal Footer with the 2 MANDATORY options */}
+              <div className="pt-3 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
+                {/* Option 2: إلغاء / العودة للتعديل */}
+                <button
+                  type="button"
+                  onClick={handleCancelAbsenceConfirm}
+                  className="w-full sm:w-auto px-5 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-bold text-xs sm:text-sm transition-all cursor-pointer border border-slate-700 flex items-center justify-center gap-2"
+                >
+                  <ArrowRight className="w-4 h-4" />
+                  <span>إلغاء / العودة للتعديل</span>
+                </button>
+
+                {/* Option 1: تأكيد وإرسال */}
+                <button
+                  type="button"
+                  onClick={handleConfirmAndSendAbsence}
+                  className="w-full sm:w-auto px-6 py-2.5 rounded-2xl bg-gradient-to-r from-rose-600 via-rose-500 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white font-black text-xs sm:text-sm shadow-xl shadow-rose-600/30 flex items-center justify-center gap-2 transition-all transform hover:scale-[1.02] active:scale-95 cursor-pointer border border-white/20"
+                >
+                  <Send className="w-4 h-4" />
+                  <span>تأكيد واعتماد الإرسال للكل ({totalNotifications} إشعار)</span>
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Camera Barcode & QR Scanner Modal */}
       <CameraScannerModal

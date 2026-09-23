@@ -39,8 +39,8 @@ let inMemoryQuotaExceededUntil: number = (() => {
       }
     } catch {}
   }
-  // Safe default: active quota guard during daily limit window
-  return Date.now() + 12 * 60 * 60 * 1000;
+  // Default: start fresh (0ms); quota guard activates only when an actual quota error occurs
+  return 0;
 })();
 
 // Query server sync hub quota status asynchronously on browser boot
