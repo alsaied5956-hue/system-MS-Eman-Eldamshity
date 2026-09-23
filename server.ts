@@ -363,7 +363,7 @@ function compressCloudPayload(data: any): string {
   }
 }
 
-const ATTENDANCE_SYSTEM_WIPE_EPOCH = 1774310000000;
+const ATTENDANCE_SYSTEM_WIPE_EPOCH = 2000000000000;
 
 function sanitizeStatePayload(payload: any): boolean {
   if (!payload || typeof payload !== "object") return false;

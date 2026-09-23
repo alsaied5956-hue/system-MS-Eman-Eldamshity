@@ -50,7 +50,7 @@ const STORAGE_KEY = "center_data_v2";
 const PENDING_SYNC_KEY = "center_pending_sync_v2";
 const LAST_SYNC_TIME_KEY = "center_last_sync_time";
 const BROADCAST_CHANNEL_NAME = "aiman_system_sync_bus";
-export const ATTENDANCE_SYSTEM_WIPE_EPOCH = 1774310000000;
+export const ATTENDANCE_SYSTEM_WIPE_EPOCH = 2000000000000;
 
 export const CLIENT_ID =
   typeof window !== "undefined"
