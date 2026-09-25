@@ -517,7 +517,24 @@ export function loadLocalData(): SystemData {
       : [];
 
     // Filter attendance history and today to eliminate any deleted attendance records
-    const rawHistory: Record<string, Record<string, string>> = parsed.attendanceHistory || {};
+    // Deep-merge authentic backup history so all authentic dates from Day 1 are ALWAYS restored and never lost
+    const backupHistory = (centerBackup?.attendanceHistory || {}) as Record<string, Record<string, string>>;
+    const rawHistory: Record<string, Record<string, string>> = {};
+    for (const [dKey, dayMap] of Object.entries(backupHistory)) {
+      if (dayMap && typeof dayMap === "object") {
+        rawHistory[dKey] = { ...(dayMap as Record<string, string>) };
+      }
+    }
+    if (parsed.attendanceHistory && typeof parsed.attendanceHistory === "object") {
+      for (const [dKey, dayMap] of Object.entries(parsed.attendanceHistory)) {
+        if (dayMap && typeof dayMap === "object") {
+          rawHistory[dKey] = {
+            ...(rawHistory[dKey] || {}),
+            ...(dayMap as Record<string, string>),
+          };
+        }
+      }
+    }
     const filteredHistory: Record<string, Record<string, string>> = {};
     for (const [dKey, dayMap] of Object.entries(rawHistory)) {
       if (!dayMap) continue;
@@ -1660,6 +1677,10 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
       mergedToday[b] = "حضور";
     } else if (loc === "تأخير" || cld === "تأخير") {
       mergedToday[b] = "تأخير";
+    } else if (loc === "عوض الحصة" || cld === "عوض الحصة" || loc === "معوض" || cld === "معوض") {
+      mergedToday[b] = "عوض الحصة";
+    } else if (loc === "إذن" || cld === "إذن") {
+      mergedToday[b] = "إذن";
     } else {
       mergedToday[b] = loc || cld || "غائب";
     }

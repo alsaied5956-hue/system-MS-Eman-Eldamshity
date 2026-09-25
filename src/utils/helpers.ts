@@ -539,3 +539,10 @@ export function getPairedAlternateDateKey(dateKeyStr: string): string | null {
   }
 }
 
+export {
+  checkStudentCompensationForDate,
+  getStudentPreviousSessionStatus,
+  formatArabicSessionDate,
+} from "./attendanceCompensation";
+export type { PreviousSessionInfo } from "./attendanceCompensation";
+

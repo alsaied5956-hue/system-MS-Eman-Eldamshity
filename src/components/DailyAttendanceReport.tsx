@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { Student, GradeName, GroupDays, GRADE_ORDER } from "../types";
-import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName } from "../utils/helpers";
+import { getTodayKey, openWhatsApp, sortStudentsByGradeAndName, checkStudentCompensationForDate } from "../utils/helpers";
 import { matchStudentSearch } from "../utils/search";
 import { exportAttendanceHistoryToExcel, exportAllAttendanceHistoryToExcel } from "../utils/excel";
 import {
@@ -39,7 +39,7 @@ interface DailyAttendanceReportProps {
   onOpenPdfModal: (type: "attendance", targetDate?: string, targetAttendanceMap?: Record<string, string>) => void;
 }
 
-type StatusFilterType = "ALL" | "حضور" | "تأخير" | "غياب" | "إذن" | "لم يسجل";
+type StatusFilterType = "ALL" | "حضور" | "تأخير" | "عوض الحصة" | "غياب" | "إذن" | "لم يسجل";
 type ViewModeType = "daily" | "all-time";
 type RateFilterType = "ALL" | "EXCELLENT" | "AVERAGE" | "WARNING";
 
@@ -157,35 +157,46 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   }, [students, filterGrade, filterDays, searchQuery, dateAttendanceMap]);
 
   // Daily Metrics Calculation
-  const { presentCount, lateCount, absentCount, excusedCount, unrecordedCount, totalCount } = useMemo(() => {
+  const { presentCount, lateCount, compensatedCount, absentCount, excusedCount, unrecordedCount, totalCount } = useMemo(() => {
     let present = 0;
     let late = 0;
+    let compensated = 0;
     let absent = 0;
     let excused = 0;
 
     baseStudents.forEach((s) => {
-      const st = dateAttendanceMap[s.barcode];
+      let st = dateAttendanceMap[s.barcode];
+      if (!st || st === "غائب" || st === "غياب") {
+        const comp = checkStudentCompensationForDate(s, selectedDate, attendanceHistory);
+        if (comp.hasCompensated) {
+          st = "عوض الحصة";
+        }
+      }
+
       if (st === "حضور") present++;
       else if (st === "تأخير") late++;
+      else if (st === "عوض الحصة" || st === "معوض") compensated++;
       else if (st === "غياب" || st === "غائب") absent++;
       else if (st === "إذن") excused++;
     });
 
     const total = baseStudents.length;
-    const unrecorded = Math.max(0, total - (present + late + absent + excused));
+    const unrecorded = Math.max(0, total - (present + late + compensated + absent + excused));
 
     return {
       totalCount: total,
       presentCount: present,
       lateCount: late,
+      compensatedCount: compensated,
       absentCount: absent,
       excusedCount: excused,
       unrecordedCount: unrecorded,
     };
-  }, [baseStudents, dateAttendanceMap]);
+  }, [baseStudents, dateAttendanceMap, selectedDate, attendanceHistory]);
 
   const presentPercent = totalCount > 0 ? Math.round((presentCount / totalCount) * 100) : 0;
   const latePercent = totalCount > 0 ? Math.round((lateCount / totalCount) * 100) : 0;
+  const compensatedPercent = totalCount > 0 ? Math.round((compensatedCount / totalCount) * 100) : 0;
   const absentPercent = totalCount > 0 ? Math.round((absentCount / totalCount) * 100) : 0;
   const excusedPercent = totalCount > 0 ? Math.round((excusedCount / totalCount) * 100) : 0;
   const unrecordedPercent = totalCount > 0 ? Math.round((unrecordedCount / totalCount) * 100) : 0;
@@ -195,15 +206,23 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
     if (statusFilter === "ALL") return baseStudents;
 
     return baseStudents.filter((s) => {
-      const raw = dateAttendanceMap[s.barcode];
+      let raw = dateAttendanceMap[s.barcode];
+      if (!raw || raw === "غائب" || raw === "غياب") {
+        const comp = checkStudentCompensationForDate(s, selectedDate, attendanceHistory);
+        if (comp.hasCompensated) {
+          raw = "عوض الحصة";
+        }
+      }
+
       if (statusFilter === "حضور") return raw === "حضور";
       if (statusFilter === "تأخير") return raw === "تأخير";
+      if (statusFilter === "عوض الحصة") return raw === "عوض الحصة" || raw === "معوض";
       if (statusFilter === "غياب") return raw === "غياب" || raw === "غائب";
       if (statusFilter === "إذن") return raw === "إذن";
       if (statusFilter === "لم يسجل") return !raw;
       return true;
     });
-  }, [baseStudents, dateAttendanceMap, statusFilter]);
+  }, [baseStudents, dateAttendanceMap, statusFilter, selectedDate, attendanceHistory]);
 
   // =========================================================================
   // 🌟 CUMULATIVE ALL-TIME ATTENDANCE LEDGER COMPUTATION (Since Day 1)
@@ -226,10 +245,17 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
       const dateLogs: { date: string; status: string }[] = [];
 
       allActiveDates.forEach((d) => {
-        const st = attendanceHistory[d]?.[s.barcode];
+        let st = attendanceHistory[d]?.[s.barcode];
         if (st) {
+          if (st === "غائب" || st === "غياب") {
+            const comp = checkStudentCompensationForDate(s, d, attendanceHistory);
+            if (comp.hasCompensated) {
+              st = "عوض الحصة";
+            }
+          }
+
           dateLogs.push({ date: d, status: st });
-          if (st === "حضور") {
+          if (st === "حضور" || st === "عوض الحصة" || st === "معوض") {
             present++;
             if (!lastDate) lastDate = d;
           } else if (st === "تأخير") {
@@ -710,6 +736,16 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
               🟡 تأخير ({lateCount})
             </button>
             <button
+              onClick={() => setStatusFilter("عوض الحصة")}
+              className={`px-3 py-1.5 rounded-xl border transition-all ${
+                statusFilter === "عوض الحصة"
+                  ? "bg-cyan-500/25 text-cyan-300 border-cyan-500/50 font-bold"
+                  : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
+              }`}
+            >
+              🔵 عوض الحصة ({compensatedCount})
+            </button>
+            <button
               onClick={() => setStatusFilter("غياب")}
               className={`px-3 py-1.5 rounded-xl border transition-all ${
                 statusFilter === "غياب"
@@ -768,7 +804,14 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                     </tr>
                   ) : (
                     displayedStudents.map((student, idx) => {
-                      const rawStatus = dateAttendanceMap[student.barcode];
+                      let rawStatus = dateAttendanceMap[student.barcode];
+                      if (!rawStatus || rawStatus === "غائب" || rawStatus === "غياب") {
+                        const comp = checkStudentCompensationForDate(student, selectedDate, attendanceHistory);
+                        if (comp.hasCompensated) {
+                          rawStatus = "عوض الحصة";
+                        }
+                      }
+
                       const status =
                         rawStatus === "غائب" || rawStatus === "غياب"
                           ? "غياب"
@@ -777,6 +820,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                       let statusBg = "bg-slate-800 text-slate-400 border-slate-700";
                       if (status === "حضور") statusBg = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
                       else if (status === "تأخير") statusBg = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+                      else if (status === "عوض الحصة" || status === "معوض") statusBg = "bg-cyan-500/25 text-cyan-300 border-cyan-500/50 font-extrabold";
                       else if (status === "غياب") statusBg = "bg-rose-500/20 text-rose-300 border-rose-500/40";
                       else if (status === "إذن") statusBg = "bg-sky-500/20 text-sky-300 border-sky-500/40";
 
@@ -1279,6 +1323,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                 >
                   <option value="حضور">🟢 حضور (في الموعد)</option>
                   <option value="تأخير">🟡 تأخير</option>
+                  <option value="عوض الحصة">🔵 عوض الحصة (حضور تعويضي)</option>
                   <option value="غياب">🔴 غياب</option>
                   <option value="إذن">⚪ إذن مسبق / عذر</option>
                 </select>

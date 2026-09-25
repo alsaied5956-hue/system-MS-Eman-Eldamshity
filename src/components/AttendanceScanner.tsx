@@ -14,6 +14,9 @@ import {
   isStudentPaid,
   getDefaultGroupDaysForDate,
   getPairedAlternateDateKey,
+  getStudentPreviousSessionStatus,
+  checkStudentCompensationForDate,
+  PreviousSessionInfo,
 } from "../utils/helpers";
 import { playBeep, speakArabicGreeting } from "../utils/audio";
 import { StudentSearchBox } from "./StudentSearchBox";
@@ -396,6 +399,7 @@ interface ScannedTableRowProps {
   student: Student;
   isPaid: boolean;
   statusToday: string;
+  previousClassStatus: PreviousSessionInfo;
   formattedTime: string;
   isCrossDayMakeup: boolean;
   selectedGrade?: string;
@@ -412,6 +416,7 @@ const ScannedTableRow = React.memo<ScannedTableRowProps>(({
   student,
   isPaid,
   statusToday,
+  previousClassStatus,
   formattedTime,
   isCrossDayMakeup,
   selectedGrade,
@@ -460,7 +465,32 @@ const ScannedTableRow = React.memo<ScannedTableRowProps>(({
           {student.customMonthlyFee !== undefined && ` (${student.customMonthlyFee} ج)`}
         </span>
       </td>
-      <td className="p-3.5">
+      {/* 🌟 Dedicated Column: Last Class Status (الحصة اللي فاتت) */}
+      <td className="p-3.5 text-center">
+        <span
+          className={`font-bold text-xs px-2.5 py-1 rounded-full border inline-flex items-center gap-1.5 shadow-sm ${
+            previousClassStatus.color === "rose"
+              ? "bg-rose-500/15 text-rose-300 border-rose-500/40 font-bold"
+              : previousClassStatus.color === "cyan"
+              ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-extrabold"
+              : previousClassStatus.color === "amber"
+              ? "bg-amber-500/15 text-amber-300 border-amber-500/40"
+              : previousClassStatus.color === "emerald"
+              ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+              : "bg-slate-800 text-slate-400 border-slate-700"
+          }`}
+          title={`حالة الحصة السابقة: ${previousClassStatus.label}`}
+        >
+          <span>{previousClassStatus.badgeText}</span>
+          {previousClassStatus.formattedDate && (
+            <span className="text-[10px] opacity-80 font-mono hidden md:inline">
+              ({previousClassStatus.formattedDate})
+            </span>
+          )}
+        </span>
+      </td>
+      {/* Current Session Status (حالة اليوم) */}
+      <td className="p-3.5 text-center">
         <span
           className={`font-bold text-xs px-2.5 py-1 rounded-full ${
             statusToday === "تأخير"
@@ -514,6 +544,7 @@ ScannedTableRow.displayName = "ScannedTableRow";
 interface AttendanceScannerProps {
   students: Student[];
   attendanceToday: Record<string, string>;
+  attendanceHistory?: Record<string, Record<string, string>>;
   scanLogOrder: string[];
   scanLogTimes: Record<string, string>;
   payments: Record<string, Record<string, PaymentRecord>>;
@@ -542,6 +573,7 @@ interface AttendanceScannerProps {
 export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   students,
   attendanceToday,
+  attendanceHistory,
   scanLogOrder,
   scanLogTimes,
   payments,
@@ -677,6 +709,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     student?: Student;
     time?: string;
     status?: string;
+    previousSessionStatus?: PreviousSessionInfo;
     isPaid?: boolean;
     canAcceptMakeup?: boolean;
     source?: "scanner" | "manual";
@@ -746,6 +779,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
   scanLogTimesRef.current = scanLogTimes || {};
   const attendanceTodayRef = useRef(attendanceToday || {});
   attendanceTodayRef.current = attendanceToday || {};
+  const attendanceHistoryRef = useRef(attendanceHistory || {});
+  attendanceHistoryRef.current = attendanceHistory || {};
   const paymentsRef = useRef(payments || {});
   paymentsRef.current = payments || {};
   const voiceEnabledRef = useRef(voiceEnabled);
@@ -905,6 +940,9 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         ? new Date(existingIso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" })
         : "";
       const existingStatus = attendanceTodayRef.current?.[student.barcode] || "حضور";
+      const monthKey = getCurrentMonthKey();
+      const isPaid = isStudentPaid(paymentsRef.current?.[monthKey], student.barcode);
+      const prevStatusInfo = getStudentPreviousSessionStatus(student, attendanceHistoryRef.current || {}, getTodayKey());
       playBeep("warning");
       setScanAlert({
         type: "warning",
@@ -913,6 +951,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
         student,
         time: existingTimeStr,
         status: existingStatus,
+        previousSessionStatus: prevStatusInfo,
+        isPaid,
         source,
       });
       return;
@@ -986,12 +1026,17 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
     speakArabicGreeting(student.name, voiceEnabledRef.current);
 
     const isCrossDay = student.groupDays !== targetDays;
+    const historyMap = attendanceHistoryRef.current || {};
+    const prevStatusInfo = getStudentPreviousSessionStatus(student, historyMap, getTodayKey());
+
     setScanAlert({
       type: hasAbsenceStreak ? "warning" : "success",
       title: hasAbsenceStreak
         ? `⚠️ إنذار غياب متكرر: ${student.name} (غائب ${student.totalAbsentDays} أيام سابقة)`
         : calculatedStatus === "تأخير"
         ? `🟡 تسجيل دخول متأخر: ${student.name}`
+        : isCrossDay
+        ? `🔵 حضور تعويضي: ${student.name}`
         : `🟢 أهلاً بك يا ${student.name} (حضور في الموعد)`,
       message: hasAbsenceStreak
         ? `⚠️ تنبيه للمشرفة: الطالب متكرر الغياب (${student.totalAbsentDays} أيام). يرجى مراجعة كشكول الواجب واستدعاء ولي الأمر إذا تكرر الغياب.`
@@ -1001,6 +1046,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       student,
       time: nowTimeStr,
       status: calculatedStatus,
+      previousSessionStatus: prevStatusInfo,
       isPaid,
       source,
     });
@@ -1266,10 +1312,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
 
     const todayKey = getTodayKey();
     const pairedAltKey = getPairedAlternateDateKey(todayKey);
-    let history: Record<string, Record<string, string>> = {};
-    try {
-      history = getAttendanceHistory();
-    } catch {}
+    const history: Record<string, Record<string, string>> =
+      attendanceHistory || attendanceHistoryRef.current || getAttendanceHistory() || {};
 
     // طابور الحضور الفعلي بالقاعة الحالية (الطلاب الذين تم مسح كروت دخولهم)
     const queueBarcodeSet = new Set((scannerQueue || []).map((b) => String(b).trim()));
@@ -1279,21 +1323,20 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
       const isPresentInQueue = queueBarcodeSet.has(bCode);
 
       if (!isPresentInQueue) {
-        // حماية طالب التعويض: التحقق إن كان قد حضر بالفعل في اليوم البديل لنفس دورة الشرح الأسبوعية
-        const attendedAlternate =
-          pairedAltKey &&
-          (history?.[pairedAltKey]?.[bCode] === "حضور" || history?.[pairedAltKey]?.[bCode] === "تأخير");
+        // حماية طالب التعويض: التحقق إن كان الطالب قد عوض الحصة بالحضور في اليوم البديل
+        const comp = checkStudentCompensationForDate(student, todayKey, history, attendanceToday);
 
-        if (attendedAlternate) {
+        if (comp.hasCompensated) {
+          const targetAltDate = comp.alternateDate || pairedAltKey || "";
           const altMsg =
             `تنبيه من منظومة الأستاذة إيمان الدمشيتي 📐\n` +
             `نفيدكم بعلم أن الطالب/ة: (${student.name})\n` +
             `المقيد في الصف: [${student.groupGrade}] - مجموعة: [${student.groupDays}]\n` +
-            `معفي من غياب اليوم (${new Date().toLocaleDateString("ar-EG")}) نظراً لحضوره تعويضياً في موعد الحصة البديلة بتاريخ (${pairedAltKey}).\n` +
-            `تم تأكيد حضوره واحتساب الحصة تعويضياً بنجاح.`;
+            `معفي من غياب اليوم (${new Date().toLocaleDateString("ar-EG")}) نظراً لحضوره تعويضياً في موعد الحصة البديلة بتاريخ (${targetAltDate}).\n` +
+            `تم تأكيد حضوره واحتساب الحصة كـ (عوض الحصة) بنجاح.`;
           compensatedExemptList.push({
             student,
-            alternateDate: pairedAltKey,
+            alternateDate: targetAltDate,
             message: altMsg,
             type: "عكس_أيام",
             subType: "exempt_attended_alternate",
@@ -2290,46 +2333,92 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
               <p className="text-xs md:text-sm text-slate-300 font-tajawal">{scanAlert.message}</p>
 
               {scanAlert.student && (
-                <div className="flex flex-wrap items-center gap-2 pt-2">
-                  <span
-                    className={`text-xs px-3 py-1 rounded-full font-bold border font-tajawal ${
-                      scanAlert.isPaid
-                        ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-                        : "bg-rose-500/20 text-rose-300 border-rose-500/40"
-                    }`}
-                  >
-                    {scanAlert.isPaid ? "✅ اشتراك الشهر مدفوع" : "⚠️ اشتراك الشهر مستحق"}
-                  </span>
+                <div className="space-y-2.5 pt-2">
+                  {/* 🌟 كارت المقارنة المزدوج: حالة الحصة الحالية + حالة الحصة السابقة (الحصة اللي فاتت) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-tajawal">
+                    {/* 1. حالة هذه الحصة (اليوم) */}
+                    <div className="bg-slate-950/80 border border-slate-700/80 rounded-2xl p-2.5 flex items-center justify-between shadow-inner">
+                      <span className="text-xs text-slate-300 font-bold">📍 هذه الحصة (اليوم):</span>
+                      <span
+                        className={`text-xs px-3 py-1 rounded-full font-bold border ${
+                          scanAlert.status === "تأخير"
+                            ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                            : scanAlert.student.groupDays !== selectedDays
+                            ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/50 font-extrabold"
+                            : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                        }`}
+                      >
+                        {scanAlert.status === "تأخير"
+                          ? "🟡 متأخر اليوم"
+                          : scanAlert.student.groupDays !== selectedDays
+                          ? "🔵 حضور تعويضي"
+                          : "🟢 حاضر في الموعد"}
+                      </span>
+                    </div>
 
-                  {scanAlert.status && (
+                    {/* 2. حالة الحصة السابقة (الحصة اللي فاتت) */}
+                    <div className="bg-slate-950/80 border border-slate-700/80 rounded-2xl p-2.5 flex items-center justify-between shadow-inner">
+                      <span className="text-xs text-slate-300 font-bold">⏮️ الحصة اللي فاتت:</span>
+                      {scanAlert.previousSessionStatus ? (
+                        <span
+                          className={`text-xs px-3 py-1 rounded-full font-extrabold border inline-flex items-center gap-1 shadow-sm ${
+                            scanAlert.previousSessionStatus.color === "rose"
+                              ? "bg-rose-500/25 text-rose-300 border-rose-500/50 font-black animate-pulse"
+                              : scanAlert.previousSessionStatus.color === "cyan"
+                              ? "bg-cyan-500/25 text-cyan-300 border-cyan-500/50 font-black"
+                              : scanAlert.previousSessionStatus.color === "amber"
+                              ? "bg-amber-500/25 text-amber-300 border-amber-500/50"
+                              : scanAlert.previousSessionStatus.color === "emerald"
+                              ? "bg-emerald-500/25 text-emerald-300 border-emerald-500/50"
+                              : "bg-slate-800 text-slate-400 border-slate-700"
+                          }`}
+                          title={scanAlert.previousSessionStatus.label}
+                        >
+                          <span>{scanAlert.previousSessionStatus.badgeText}</span>
+                          {scanAlert.previousSessionStatus.formattedDate && (
+                            <span className="text-[10px] opacity-80 font-mono hidden md:inline">
+                              ({scanAlert.previousSessionStatus.formattedDate})
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+                          ⚪ جديد
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* شارات الدفع وطريقة التسجيل */}
+                  <div className="flex flex-wrap items-center gap-2">
                     <span
                       className={`text-xs px-3 py-1 rounded-full font-bold border font-tajawal ${
-                        scanAlert.status === "تأخير"
-                          ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                          : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                        scanAlert.isPaid
+                          ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                          : "bg-rose-500/20 text-rose-300 border-rose-500/40"
                       }`}
                     >
-                      {scanAlert.status === "تأخير" ? "🟡 تأخير" : "🟢 حضور"}
+                      {scanAlert.isPaid ? "✅ اشتراك الشهر مدفوع" : "⚠️ اشتراك الشهر مستحق"}
                     </span>
-                  )}
 
-                  {scanAlert.source && (
-                    <span
-                      className={`text-xs px-3 py-1 rounded-full font-bold border font-tajawal flex items-center gap-1 ${
-                        scanAlert.source === "manual"
-                          ? "bg-sky-500/20 text-sky-300 border-sky-500/40"
-                          : "bg-amber-500/20 text-amber-300 border-amber-500/40"
-                      }`}
-                    >
-                      {scanAlert.source === "manual" ? "✍️ تسجيل يدوي معتمد" : "⚡ مسح باركود آلي"}
-                    </span>
-                  )}
+                    {scanAlert.source && (
+                      <span
+                        className={`text-xs px-3 py-1 rounded-full font-bold border font-tajawal flex items-center gap-1 ${
+                          scanAlert.source === "manual"
+                            ? "bg-sky-500/20 text-sky-300 border-sky-500/40"
+                            : "bg-amber-500/20 text-amber-300 border-amber-500/40"
+                        }`}
+                      >
+                        {scanAlert.source === "manual" ? "✍️ تسجيل يدوي معتمد" : "⚡ مسح باركود آلي"}
+                      </span>
+                    )}
 
-                  {scanAlert.student.customMonthlyFee !== undefined && (
-                    <span className="text-xs px-3 py-1 rounded-full font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 font-tajawal">
-                      🏷️ اشتراك مخصص: {scanAlert.student.customMonthlyFee} ج.م
-                    </span>
-                  )}
+                    {scanAlert.student.customMonthlyFee !== undefined && (
+                      <span className="text-xs px-3 py-1 rounded-full font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 font-tajawal">
+                        🏷️ اشتراك مخصص: {scanAlert.student.customMonthlyFee} ج.م
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -2451,7 +2540,8 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                 <th className="p-3.5">اسم الطالب</th>
                 <th className="p-3.5">المرحلة والمجموعة</th>
                 <th className="p-3.5">الاشتراك الشهري</th>
-                <th className="p-3.5">حالة الدخول</th>
+                <th className="p-3.5 text-center">حالة الحصة السابقة</th>
+                <th className="p-3.5 text-center">حالة الدخول (اليوم)</th>
                 <th className="p-3.5">طريقة التسجيل</th>
                 <th className="p-3.5">وقت التسجيل</th>
                 <th className="p-3.5 text-center">إجراءات ومراسلة</th>
@@ -2460,7 +2550,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
             <tbody className="divide-y divide-indigo-950/50">
               {filteredBarcodes.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p-10 text-center text-slate-400 space-y-2">
+                  <td colSpan={10} className="p-10 text-center text-slate-400 space-y-2">
                     <p className="text-sm font-bold text-slate-300 font-fancy">
                       في انتظار قراءة أول كارت بالسكانر لهذه الحصة...
                     </p>
@@ -2485,6 +2575,11 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                     : "--:--";
 
                   const isCrossDayMakeup = student.groupDays !== selectedDays;
+                  const prevClassStatus = getStudentPreviousSessionStatus(
+                    student,
+                    attendanceHistory || attendanceHistoryRef.current || {},
+                    getTodayKey()
+                  );
 
                   return (
                     <ScannedTableRow
@@ -2494,6 +2589,7 @@ export const AttendanceScanner: React.FC<AttendanceScannerProps> = ({
                       student={student}
                       isPaid={isPaid}
                       statusToday={statusToday}
+                      previousClassStatus={prevClassStatus}
                       formattedTime={formattedTime}
                       isCrossDayMakeup={isCrossDayMakeup}
                       source={scanSources[barcode] || "scanner"}

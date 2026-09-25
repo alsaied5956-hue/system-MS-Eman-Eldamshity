@@ -160,6 +160,8 @@ export const PrintPDFModal: React.FC<PrintPDFModalProps> = ({
                             ? "text-emerald-700"
                             : status === "تأخير"
                             ? "text-amber-700"
+                            : status === "عوض الحصة" || status === "معوض"
+                            ? "text-cyan-700 font-bold"
                             : status === "إذن"
                             ? "text-sky-700"
                             : status === "لم يسجل"

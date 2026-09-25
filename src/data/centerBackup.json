@@ -26374,7 +26374,6 @@
     }
   ],
   "attendanceHistory": {
-    "2026-09-25": {},
     "2026-08-14": {
       "101040": "غياب",
       "101130": "غياب",
@@ -26589,6 +26588,7 @@
     "2026-09-16": {
       "101257": "تأخير"
     },
+    "2026-09-25": {},
     "2026-09-23": {
       "101002": "حضور",
       "101003": "حضور",
@@ -41556,11 +41556,10 @@
     "101941"
   ],
   "scanLogUpdatedAt": 1790123286277,
-  "updatedAt": 1790339264771,
+  "updatedAt": 1790342214579,
   "_lastClientId": "dev_sy1efqj_mtww1ppq",
   "_lastClientTimestamp": 1789170911588,
   "syncedAtIso": "2026-09-11T23:55:11.588Z",
   "_packed": 3,
-  "attendanceTodayDate": "",
-  "attendanceWipedAt": 0
+  "attendanceTodayDate": ""
 }

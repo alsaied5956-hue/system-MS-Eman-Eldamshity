@@ -62,7 +62,7 @@ export interface Student {
   createdAt?: string;
 }
 
-export type AttendanceStatus = "حضور" | "تأخير" | "غائب" | "إذن" | "معفى_تعويض" | "استئذان";
+export type AttendanceStatus = "حضور" | "تأخير" | "غائب" | "عوض الحصة" | "معوض" | "إذن" | "معفى_تعويض" | "استئذان";
 
 export interface PaymentRecord {
   id?: string;

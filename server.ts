@@ -426,6 +426,21 @@ async function syncServerWithFirestore() {
         const decompressed = decompressCloudPayload(d._compressedPayload);
         if (decompressed && Array.isArray(decompressed.students)) {
           const wasCleaned = sanitizeStatePayload(decompressed);
+          
+          // Protect authentic restored attendance history from being overwritten by stale cloud state
+          const existingHistory = cachedServerState?.attendanceHistory || {};
+          const incomingHistory = decompressed.attendanceHistory || {};
+          const mergedHist: Record<string, Record<string, string>> = { ...existingHistory };
+          for (const [dKey, dayMap] of Object.entries(incomingHistory)) {
+            if (dayMap && typeof dayMap === "object") {
+              mergedHist[dKey] = {
+                ...(mergedHist[dKey] || {}),
+                ...(dayMap as Record<string, string>),
+              };
+            }
+          }
+          decompressed.attendanceHistory = mergedHist;
+
           cachedServerState = decompressed;
           lastServerUpdate = wasCleaned ? Date.now() : (d.updatedAt || Date.now());
           fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(decompressed), "utf-8");
@@ -459,6 +474,21 @@ async function syncServerWithFirestore() {
           const decompressed = decompressCloudPayload(d._compressedPayload);
           if (decompressed && Array.isArray(decompressed.students)) {
             sanitizeStatePayload(decompressed);
+            
+            // Protect authentic attendance history
+            const existingHistory = cachedServerState?.attendanceHistory || {};
+            const incomingHistory = decompressed.attendanceHistory || {};
+            const mergedHist: Record<string, Record<string, string>> = { ...existingHistory };
+            for (const [dKey, dayMap] of Object.entries(incomingHistory)) {
+              if (dayMap && typeof dayMap === "object") {
+                mergedHist[dKey] = {
+                  ...(mergedHist[dKey] || {}),
+                  ...(dayMap as Record<string, string>),
+                };
+              }
+            }
+            decompressed.attendanceHistory = mergedHist;
+
             cachedServerState = decompressed;
             lastServerUpdate = d.updatedAt;
             fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(decompressed), "utf-8");

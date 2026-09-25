@@ -50,6 +50,7 @@ import {
   formatTimeArabic,
   isStudentPaid,
   getPairedAlternateDateKey,
+  checkStudentCompensationForDate,
 } from "./utils/helpers";
 import {
   subscribeToGroupFinished,
@@ -1180,8 +1181,21 @@ export default function App() {
     groupStudents.forEach((student) => {
       const b = String(student.barcode).trim();
       const priorStatus = attendanceTodayRef.current[b] || attendanceToday[b];
-      if (absentBarcodes.has(b)) {
-        if (priorStatus === "حضور" || priorStatus === "تأخير") {
+
+      // حماية طالب التعويض: التحقق إن كان الطالب قد عوض الحصة بالحضور في اليوم البديل (مثلاً السبت بدلاً من الأحد)
+      const compCheck = checkStudentCompensationForDate(
+        student,
+        todayKey,
+        attendanceHistoryRef.current,
+        attendanceTodayRef.current
+      );
+
+      if (compCheck.hasCompensated) {
+        // الطالب حضر تعويض في اليوم البديل -> لا يسجل غائب بل يسجل "عوض الحصة"
+        updatedToday[b] = "عوض الحصة";
+        absentBarcodes.delete(b);
+      } else if (absentBarcodes.has(b)) {
+        if (priorStatus === "حضور" || priorStatus === "تأخير" || priorStatus === "عوض الحصة" || priorStatus === "معوض") {
           updatedToday[b] = priorStatus;
         } else {
           updatedToday[b] = "غائب";
@@ -1189,7 +1203,7 @@ export default function App() {
       } else if (lateBarcodes.has(b)) {
         updatedToday[b] = "تأخير";
       } else {
-        updatedToday[b] = priorStatus === "تأخير" ? "تأخير" : "حضور";
+        updatedToday[b] = priorStatus === "تأخير" ? "تأخير" : (priorStatus === "عوض الحصة" || priorStatus === "معوض" ? "عوض الحصة" : "حضور");
       }
     });
 
@@ -1233,24 +1247,6 @@ export default function App() {
       ...attendanceHistory,
       [todayKey]: updatedToday,
     };
-
-    // Mutual session exclusion: A student attending on one group day (e.g. Sunday makeup)
-    // must NOT have a duplicate presence on the paired alternate day (e.g. Saturday)
-    const pairedDateKey = getPairedAlternateDateKey(todayKey);
-    if (pairedDateKey && updatedHistory[pairedDateKey] && crossDayList && crossDayList.length > 0) {
-      const pairedHistory = { ...updatedHistory[pairedDateKey] };
-      let hasPairedChanges = false;
-      crossDayList.forEach((item) => {
-        const b = String(item.student.barcode).trim();
-        if (pairedHistory[b] === "حضور" || pairedHistory[b] === "تأخير") {
-          delete pairedHistory[b];
-          hasPairedChanges = true;
-        }
-      });
-      if (hasPairedChanges) {
-        updatedHistory[pairedDateKey] = pairedHistory;
-      }
-    }
 
     const updatedStudents = (appStudentsRef.current || students).map((s) => {
       const b = String(s.barcode).trim();
@@ -2332,6 +2328,7 @@ export default function App() {
                 <AttendanceScanner
                   students={students}
                   attendanceToday={attendanceToday}
+                  attendanceHistory={attendanceHistory}
                   scanLogOrder={scanLogOrder}
                   scanLogTimes={scanLogTimes}
                   payments={payments}
