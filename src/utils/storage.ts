@@ -1165,11 +1165,40 @@ async function resolvePayloadFromSnapshot(val: any): Promise<Partial<SystemData>
   return val as Partial<SystemData>;
 }
 
+// Server Sync Hub is disabled by default to avoid futile requests in static/serverless hosting environments (e.g. Cloud Run, Vercel, static preview)
+let isLocalServerHubAvailable = false;
+let serverHubProbeDone = false;
+
+export function checkIsLocalServerHubAvailable(): boolean {
+  return isLocalServerHubAvailable;
+}
+
+export async function probeServerHubAvailability(): Promise<boolean> {
+  if (serverHubProbeDone) return isLocalServerHubAvailable;
+  if (typeof window === "undefined") return false;
+  serverHubProbeDone = true;
+
+  try {
+    const res = await fetch("/api/sync/ping", { method: "GET", cache: "no-store" });
+    const cType = res.headers.get("content-type") || "";
+    if (res.ok && cType.includes("application/json")) {
+      const data = await res.json();
+      isLocalServerHubAvailable = data?.ok === true;
+    } else {
+      isLocalServerHubAvailable = false;
+    }
+  } catch {
+    isLocalServerHubAvailable = false;
+  }
+  return isLocalServerHubAvailable;
+}
+
 /**
  * Push system data to the High-Speed Zero-Quota Server Hub (< 50ms broadcast across devices)
+ * Only attempts if an Express server was verified to be available
  */
 export async function pushToServerSyncHub(data: SystemData): Promise<boolean> {
-  if (typeof window === "undefined") return false;
+  if (typeof window === "undefined" || !isLocalServerHubAvailable) return false;
   try {
     const res = await fetch("/api/sync/push", {
       method: "POST",
@@ -1179,8 +1208,15 @@ export async function pushToServerSyncHub(data: SystemData): Promise<boolean> {
         sourceDeviceId: CLIENT_ID,
       }),
     });
-    return res.ok;
+    if (!res.ok) {
+      if (res.status === 404 || res.status === 405) {
+        isLocalServerHubAvailable = false;
+      }
+      return false;
+    }
+    return true;
   } catch {
+    isLocalServerHubAvailable = false;
     return false;
   }
 }
@@ -2731,15 +2767,21 @@ if (typeof window !== "undefined") {
   if (typeof window !== "undefined" && "EventSource" in window) {
     let sse: EventSource | null = null;
     let sseRetryTimer: any = null;
+    let sseErrorCount = 0;
 
     const connectSse = () => {
+      if (!isLocalServerHubAvailable) return;
       try {
         if (sse) {
           try { sse.close(); } catch {}
           sse = null;
         }
         sse = new EventSource("/api/sync/events");
+        sse.onopen = () => {
+          sseErrorCount = 0;
+        };
         sse.onmessage = (event) => {
+          sseErrorCount = 0;
           try {
             const payload = JSON.parse(event.data);
             if (payload?.type === "live_scan" && payload?.barcode) {
@@ -2844,19 +2886,27 @@ if (typeof window !== "undefined") {
           } catch {}
         };
         sse.onerror = () => {
+          isLocalServerHubAvailable = false;
           if (sse) {
             try { sse.close(); } catch {}
             sse = null;
           }
-          clearTimeout(sseRetryTimer);
-          sseRetryTimer = setTimeout(connectSse, 5000);
+          if (sseRetryTimer) {
+            clearTimeout(sseRetryTimer);
+            sseRetryTimer = null;
+          }
         };
       } catch {
-        clearTimeout(sseRetryTimer);
-        sseRetryTimer = setTimeout(connectSse, 5000);
+        isLocalServerHubAvailable = false;
       }
     };
-    connectSse();
+
+    // Only attempt SSE connection if an active server hub was verified via probe
+    probeServerHubAvailability().then((available) => {
+      if (available) {
+        connectSse();
+      }
+    }).catch(() => {});
   }
 }
 

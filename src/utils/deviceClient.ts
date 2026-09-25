@@ -13,6 +13,7 @@
  */
 
 import { DeviceEntryExitEvent, DeviceInfo, EntryExitType } from "../types";
+import { checkIsLocalServerHubAvailable } from "./storage";
 
 const STORAGE_DEVICE_ID_KEY = "app_persistent_device_id";
 const STORAGE_DEVICE_NAME_KEY = "app_persistent_device_name";
@@ -218,19 +219,25 @@ export function subscribeToDeviceLiveStream(
   onEvent: (event: DeviceEntryExitEvent) => void,
   onError?: (err: any) => void
 ): () => void {
-  if (typeof window === "undefined" || !("EventSource" in window)) {
+  if (typeof window === "undefined" || !("EventSource" in window) || !checkIsLocalServerHubAvailable()) {
     return () => {};
   }
 
   let sse: EventSource | null = null;
   let isClosed = false;
+  let errorCount = 0;
 
   function connect() {
-    if (isClosed) return;
+    if (isClosed || errorCount >= 2) return;
     try {
       sse = new EventSource(`/api/devices/${encodeURIComponent(deviceId)}/events`);
 
+      sse.onopen = () => {
+        errorCount = 0;
+      };
+
       sse.onmessage = (e) => {
+        errorCount = 0;
         try {
           const payload = JSON.parse(e.data);
           if (payload?.type === "device_scan" && payload?.event) {
@@ -240,17 +247,23 @@ export function subscribeToDeviceLiveStream(
       };
 
       sse.onerror = (err) => {
+        errorCount++;
         if (onError) onError(err);
         if (sse) {
-          sse.close();
+          try { sse.close(); } catch {}
           sse = null;
+        }
+        if (errorCount >= 2) {
+          // If SSE endpoint is not available (e.g. static hosting), stop loop
+          return;
         }
         // Auto-reconnect with safe delay
         if (!isClosed) {
-          setTimeout(connect, 3000);
+          setTimeout(connect, 10000);
         }
       };
     } catch (err) {
+      errorCount++;
       if (onError) onError(err);
     }
   }

@@ -19,7 +19,7 @@
  */
 
 import { doc, setDoc, deleteDoc, getDoc, writeBatch } from "firebase/firestore";
-import { purgeTombstoneBarcode } from "./storage";
+import { purgeTombstoneBarcode, checkIsLocalServerHubAvailable } from "./storage";
 import {
   db,
   ensureFirebaseAuth,
@@ -179,7 +179,7 @@ export function dualSyncLiveScan(params: ScanSyncParams) {
   );
 
   // 2.5️⃣ Atomic Multi-Device Local Server Hub Broadcast (<2ms)
-  if (typeof window !== "undefined") {
+  if (typeof window !== "undefined" && checkIsLocalServerHubAvailable()) {
     fetch("/api/sync/live-scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -690,17 +690,19 @@ export function dualSyncPaymentDelete(params: { barcode: string; monthKey: strin
         sourceDeviceId: getPersistentDeviceId(),
       });
 
-      // Also evict from Server Sync Hub state and disk cache
-      fetch("/api/sync/delete-payment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          barcode: b,
-          monthKey: params.monthKey,
-          paymentId: params.paymentId,
-          sourceDeviceId: getPersistentDeviceId(),
-        }),
-      }).catch(() => {});
+      // Also evict from Server Sync Hub state and disk cache (if active)
+      if (checkIsLocalServerHubAvailable()) {
+        fetch("/api/sync/delete-payment", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            barcode: b,
+            monthKey: params.monthKey,
+            paymentId: params.paymentId,
+            sourceDeviceId: getPersistentDeviceId(),
+          }),
+        }).catch(() => {});
+      }
     })(),
     "Supabase & Firebase RTDB delete payment"
   );
@@ -868,16 +870,18 @@ export function dualSyncStudentDelete(barcode: string, studentId?: string | numb
         sourceDeviceId: getPersistentDeviceId(),
       });
 
-      // Also evict from Server Sync Hub state and disk cache
-      fetch("/api/sync/delete-student", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          barcode: b,
-          studentId,
-          sourceDeviceId: getPersistentDeviceId(),
-        }),
-      }).catch(() => {});
+      // Also evict from Server Sync Hub state and disk cache (if active)
+      if (checkIsLocalServerHubAvailable()) {
+        fetch("/api/sync/delete-student", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            barcode: b,
+            studentId,
+            sourceDeviceId: getPersistentDeviceId(),
+          }),
+        }).catch(() => {});
+      }
     })(),
     "Supabase & Firebase RTDB delete student"
   );
@@ -934,17 +938,19 @@ export function dualSyncAttendanceDelete(barcode: string, dateKey?: string, atte
         sourceDeviceId: getPersistentDeviceId(),
       });
 
-      // Also evict from Server Sync Hub state and disk cache
-      fetch("/api/sync/delete-attendance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          barcode: b,
-          dateKey: dKey,
-          attendanceId,
-          sourceDeviceId: getPersistentDeviceId(),
-        }),
-      }).catch(() => {});
+      // Also evict from Server Sync Hub state and disk cache (if active)
+      if (checkIsLocalServerHubAvailable()) {
+        fetch("/api/sync/delete-attendance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            barcode: b,
+            dateKey: dKey,
+            attendanceId,
+            sourceDeviceId: getPersistentDeviceId(),
+          }),
+        }).catch(() => {});
+      }
     })(),
     "Supabase & Firebase RTDB delete attendance"
   );

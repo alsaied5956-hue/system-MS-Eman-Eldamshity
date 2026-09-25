@@ -42,6 +42,7 @@ import {
   pullLatestCloudDataImmediately,
   hydrateFromIndexedDB,
   SyncStatus,
+  checkIsLocalServerHubAvailable,
 } from "./utils/storage";
 import {
   getTodayKey,
@@ -1101,21 +1102,23 @@ export default function App() {
         true
       );
 
-      // ⚡ Atomic High-Speed Broadcast to Server Hub (< 2ms)
-      fetch("/api/sync/live-scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          barcode: cleanBarcode,
-          status,
-          timeIso,
-          name: fullStudent?.name || `طالب ${cleanBarcode}`,
-          grade: fullStudent?.groupGrade || "",
-          days: fullStudent?.groupDays || "",
-          scannedBy: currentUser?.username || "الماسح",
-          sourceDeviceId: getPersistentDeviceId(),
-        }),
-      }).catch(() => {});
+      // ⚡ Atomic High-Speed Broadcast to Server Hub (< 2ms) (if local server active)
+      if (checkIsLocalServerHubAvailable()) {
+        fetch("/api/sync/live-scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            barcode: cleanBarcode,
+            status,
+            timeIso,
+            name: fullStudent?.name || `طالب ${cleanBarcode}`,
+            grade: fullStudent?.groupGrade || "",
+            days: fullStudent?.groupDays || "",
+            scannedBy: currentUser?.username || "الماسح",
+            sourceDeviceId: getPersistentDeviceId(),
+          }),
+        }).catch(() => {});
+      }
 
       // ⚡ Asynchronous Cloud Persistence: non-blocking background write
       cloudRecordAttendance(

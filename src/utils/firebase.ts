@@ -43,17 +43,21 @@ let inMemoryQuotaExceededUntil: number = (() => {
   return 0;
 })();
 
-// Query server sync hub quota status asynchronously on browser boot
+import { checkIsLocalServerHubAvailable } from "./storage";
+
+// Query server sync hub quota status asynchronously on browser boot ONLY if local server hub is active
 if (typeof window !== "undefined") {
   try {
-    fetch("/api/sync/quota")
-      .then((r) => r.json())
-      .then((res) => {
-        if (res && res.quotaActive && res.quotaExceededUntil) {
-          markFirestoreQuotaExceeded(Math.max(60000, res.quotaExceededUntil - Date.now()));
-        }
-      })
-      .catch(() => {});
+    if (checkIsLocalServerHubAvailable()) {
+      fetch("/api/sync/quota")
+        .then((r) => r.json())
+        .then((res) => {
+          if (res && res.quotaActive && res.quotaExceededUntil) {
+            markFirestoreQuotaExceeded(Math.max(60000, res.quotaExceededUntil - Date.now()));
+          }
+        })
+        .catch(() => {});
+    }
   } catch {}
 }
 
@@ -119,7 +123,9 @@ export function markFirestoreQuotaExceeded(durationMs = 60 * 60 * 1000, reason?:
           detail: { isExceeded: true, until: inMemoryQuotaExceededUntil, reason },
         })
       );
-      fetch("/api/sync/quota/report", { method: "POST" }).catch(() => {});
+      if (checkIsLocalServerHubAvailable()) {
+        fetch("/api/sync/quota/report", { method: "POST" }).catch(() => {});
+      }
     } catch {}
   }
 }
