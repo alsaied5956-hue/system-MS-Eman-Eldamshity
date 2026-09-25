@@ -39,7 +39,7 @@ interface DailyAttendanceReportProps {
   onOpenPdfModal: (type: "attendance", targetDate?: string, targetAttendanceMap?: Record<string, string>) => void;
 }
 
-type StatusFilterType = "ALL" | "حضور" | "تأخير" | "عوض الحصة" | "غياب" | "إذن" | "لم يسجل";
+type StatusFilterType = "ALL" | "حضور" | "تأخير" | "تم تعويض اليوم" | "عوض الحصة" | "غياب" | "إذن" | "لم يسجل";
 type ViewModeType = "daily" | "all-time";
 type RateFilterType = "ALL" | "EXCELLENT" | "AVERAGE" | "WARNING";
 
@@ -74,18 +74,8 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   // Main View Toggle: Daily Session Report vs All-Time Cumulative Ledger
   const [viewMode, setViewMode] = useState<ViewModeType>("daily");
 
-  // Selected date defaults intelligently:
-  // If today has recorded data, use today.
-  // Otherwise, default to the latest recorded active date (e.g. 2026-09-24) so teacher doesn't see a blank "0" page!
-  const [selectedDate, setSelectedDate] = useState<string>(() => {
-    if (attendanceHistory[todayKey] && Object.keys(attendanceHistory[todayKey]).length > 0) {
-      return todayKey;
-    }
-    const dates = Object.keys(attendanceHistory)
-      .filter((d) => attendanceHistory[d] && Object.keys(attendanceHistory[d]).length > 0)
-      .sort((a, b) => b.localeCompare(a));
-    return dates[0] || todayKey;
-  });
+  // Selected date defaults to today's date strictly (تقرير جلسة اليوم)
+  const [selectedDate, setSelectedDate] = useState<string>(todayKey);
 
   // Daily Filters
   const [filterGrade, setFilterGrade] = useState<string>("ALL");
@@ -104,17 +94,6 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
   const [newStatusSelect, setNewStatusSelect] = useState("حضور");
   const [viewingHistoryStudent, setViewingHistoryStudent] = useState<StudentCumulativeRecord | null>(null);
 
-  // Sync selectedDate if initial was empty and dates are now loaded
-  useEffect(() => {
-    if (recordedDates.length > 0) {
-      const todayHasData = attendanceHistory[todayKey] && Object.keys(attendanceHistory[todayKey]).length > 0;
-      const currentSelectedHasData = attendanceHistory[selectedDate] && Object.keys(attendanceHistory[selectedDate]).length > 0;
-      if (!todayHasData && !currentSelectedHasData) {
-        setSelectedDate(recordedDates[0]);
-      }
-    }
-  }, [recordedDates, attendanceHistory, todayKey, selectedDate]);
-
   const isFutureDate = selectedDate > todayKey;
 
   const handleDateChange = (newDate: string) => {
@@ -125,18 +104,14 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
     return attendanceHistory[selectedDate] || {};
   }, [attendanceHistory, selectedDate]);
 
-  // Base list of students matching daily grade and group days
+  // Base list of students matching daily grade and group days:
+  // Strict Group Integrity: Students remain strictly in their enrolled group days.
+  // A student in "أحد - ثلاثاء - خميس" will NEVER be moved into "سبت - إثنين - أربعاء"!
   const baseStudents = useMemo(() => {
     const base = students.filter((s) => {
       if (filterGrade !== "ALL" && s.groupGrade !== filterGrade) return false;
       if (filterDays !== "ALL") {
-        if (s.groupDays === filterDays) return true;
-        // Include other-group students ONLY if they actually attended on this specific date (compensation session)
-        const st = dateAttendanceMap[s.barcode];
-        if (st === "حضور" || st === "تأخير") {
-          return true;
-        }
-        return false;
+        return s.groupDays === filterDays;
       }
       return true;
     });
@@ -154,7 +129,7 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
     }
 
     return sortStudentsByGradeAndName(base);
-  }, [students, filterGrade, filterDays, searchQuery, dateAttendanceMap]);
+  }, [students, filterGrade, filterDays, searchQuery]);
 
   // Daily Metrics Calculation
   const { presentCount, lateCount, compensatedCount, absentCount, excusedCount, unrecordedCount, totalCount } = useMemo(() => {
@@ -169,13 +144,15 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
       if (!st || st === "غائب" || st === "غياب") {
         const comp = checkStudentCompensationForDate(s, selectedDate, attendanceHistory);
         if (comp.hasCompensated) {
-          st = "عوض الحصة";
+          st = "تم تعويض اليوم";
         }
+      } else if (st === "عوض الحصة" || st === "معوض") {
+        st = "تم تعويض اليوم";
       }
 
       if (st === "حضور") present++;
       else if (st === "تأخير") late++;
-      else if (st === "عوض الحصة" || st === "معوض") compensated++;
+      else if (st === "تم تعويض اليوم" || st === "عوض الحصة" || st === "معوض") compensated++;
       else if (st === "غياب" || st === "غائب") absent++;
       else if (st === "إذن") excused++;
     });
@@ -210,13 +187,17 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
       if (!raw || raw === "غائب" || raw === "غياب") {
         const comp = checkStudentCompensationForDate(s, selectedDate, attendanceHistory);
         if (comp.hasCompensated) {
-          raw = "عوض الحصة";
+          raw = "تم تعويض اليوم";
         }
+      } else if (raw === "عوض الحصة" || raw === "معوض") {
+        raw = "تم تعويض اليوم";
       }
 
       if (statusFilter === "حضور") return raw === "حضور";
       if (statusFilter === "تأخير") return raw === "تأخير";
-      if (statusFilter === "عوض الحصة") return raw === "عوض الحصة" || raw === "معوض";
+      if (statusFilter === "تم تعويض اليوم" || statusFilter === "عوض الحصة") {
+        return raw === "تم تعويض اليوم" || raw === "عوض الحصة" || raw === "معوض";
+      }
       if (statusFilter === "غياب") return raw === "غياب" || raw === "غائب";
       if (statusFilter === "إذن") return raw === "إذن";
       if (statusFilter === "لم يسجل") return !raw;
@@ -430,57 +411,23 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
       {/* ========================================================================= */}
       {viewMode === "daily" && (
         <div className="space-y-6 animate-in fade-in duration-300">
-          {/* Recorded Dates Pill Selector */}
-          {recordedDates.length > 0 && (
-            <div className="glass-panel p-3.5 rounded-2xl flex flex-wrap items-center gap-2 font-tajawal text-xs shadow-md">
-              <span className="text-amber-300 font-bold flex items-center gap-1.5 shrink-0">
-                <Calendar className="w-3.5 h-3.5 text-amber-400" />
-                <span>الجلسات المسجلة فعلياً بالنظام (اضغط للانتقال):</span>
-              </span>
-              <div className="flex flex-wrap items-center gap-1.5">
-                {recordedDates.map((dKey) => {
-                  const count = Object.keys(attendanceHistory[dKey] || {}).length;
-                  const isCurrent = dKey === selectedDate;
-                  const isToday = dKey === todayKey;
-                  return (
-                    <button
-                      key={dKey}
-                      type="button"
-                      onClick={() => handleDateChange(dKey)}
-                      className={`px-3 py-1.5 rounded-xl font-mono text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                        isCurrent
-                          ? "bg-amber-400 text-slate-950 shadow-md shadow-amber-400/20"
-                          : "bg-[#080d1e] border border-indigo-500/30 text-slate-300 hover:text-white hover:border-amber-400/50"
-                      }`}
-                    >
-                      <span>{dKey}</span>
-                      {isToday && (
-                        <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/30 text-amber-200">
-                          اليوم
-                        </span>
-                      )}
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded-md ${
-                          isCurrent ? "bg-slate-900 text-amber-300 font-bold" : "bg-indigo-500/20 text-slate-400"
-                        }`}
-                      >
-                        {count} سجل
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Smart Notice: If viewing a past date because today has no scans yet */}
+          {/* Notice if viewing a different date than today */}
           {selectedDate !== todayKey && Object.keys(dateAttendanceMap).length > 0 && (
-            <div className="bg-indigo-950/40 border border-indigo-500/30 p-3.5 rounded-2xl flex items-center gap-3 text-indigo-200 text-xs font-tajawal shadow-sm">
-              <Info className="w-4 h-4 text-indigo-400 shrink-0" />
-              <span>
-                أنت تشاهد حالياً سجل جلسة تاريخ: <strong className="text-amber-300 font-mono text-sm px-1.5">{selectedDate}</strong> وبها{" "}
-                <strong className="text-emerald-400 font-mono">{Object.keys(dateAttendanceMap).length} طالب</strong> مسجل. يمكنك التبديل لأي تاريخ أو تاريخ اليوم من الشريط أعلاه.
-              </span>
+            <div className="bg-indigo-950/40 border border-indigo-500/30 p-3.5 rounded-2xl flex items-center justify-between gap-3 text-indigo-200 text-xs font-tajawal shadow-sm">
+              <div className="flex items-center gap-2.5">
+                <Info className="w-4 h-4 text-indigo-400 shrink-0" />
+                <span>
+                  أنت تشاهد حالياً سجل جلسة تاريخ: <strong className="text-amber-300 font-mono text-sm px-1.5">{selectedDate}</strong> وبها{" "}
+                  <strong className="text-emerald-400 font-mono">{Object.keys(dateAttendanceMap).length} طالب</strong> مسجل.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleDateChange(todayKey)}
+                className="px-3 py-1 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs transition-colors shrink-0 cursor-pointer"
+              >
+                العودة لجلسة اليوم
+              </button>
             </div>
           )}
 
@@ -736,14 +683,14 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
               🟡 تأخير ({lateCount})
             </button>
             <button
-              onClick={() => setStatusFilter("عوض الحصة")}
+              onClick={() => setStatusFilter("تم تعويض اليوم")}
               className={`px-3 py-1.5 rounded-xl border transition-all ${
-                statusFilter === "عوض الحصة"
+                statusFilter === "تم تعويض اليوم" || statusFilter === "عوض الحصة"
                   ? "bg-cyan-500/25 text-cyan-300 border-cyan-500/50 font-bold"
                   : "bg-slate-900/60 text-slate-400 border-indigo-900/40 hover:text-slate-200"
               }`}
             >
-              🔵 عوض الحصة ({compensatedCount})
+              🔵 تم تعويض اليوم ({compensatedCount})
             </button>
             <button
               onClick={() => setStatusFilter("غياب")}
@@ -805,11 +752,16 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                   ) : (
                     displayedStudents.map((student, idx) => {
                       let rawStatus = dateAttendanceMap[student.barcode];
+                      let isCompensatedToday = false;
                       if (!rawStatus || rawStatus === "غائب" || rawStatus === "غياب") {
                         const comp = checkStudentCompensationForDate(student, selectedDate, attendanceHistory);
                         if (comp.hasCompensated) {
-                          rawStatus = "عوض الحصة";
+                          rawStatus = "تم تعويض اليوم";
+                          isCompensatedToday = true;
                         }
+                      } else if (rawStatus === "عوض الحصة" || rawStatus === "معوض" || rawStatus === "تم تعويض اليوم") {
+                        rawStatus = "تم تعويض اليوم";
+                        isCompensatedToday = true;
                       }
 
                       const status =
@@ -818,11 +770,23 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                           : rawStatus || "لم يسجل";
 
                       let statusBg = "bg-slate-800 text-slate-400 border-slate-700";
-                      if (status === "حضور") statusBg = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
-                      else if (status === "تأخير") statusBg = "bg-amber-500/20 text-amber-300 border-amber-500/40";
-                      else if (status === "عوض الحصة" || status === "معوض") statusBg = "bg-cyan-500/25 text-cyan-300 border-cyan-500/50 font-extrabold";
-                      else if (status === "غياب") statusBg = "bg-rose-500/20 text-rose-300 border-rose-500/40";
-                      else if (status === "إذن") statusBg = "bg-sky-500/20 text-sky-300 border-sky-500/40";
+                      let statusText = status;
+                      if (status === "حضور") {
+                        statusBg = "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+                        statusText = "حضور";
+                      } else if (status === "تأخير") {
+                        statusBg = "bg-amber-500/20 text-amber-300 border-amber-500/40";
+                        statusText = "تأخير";
+                      } else if (isCompensatedToday || status === "تم تعويض اليوم") {
+                        statusBg = "bg-cyan-500/25 text-cyan-300 border-cyan-500/50 font-extrabold";
+                        statusText = "تم تعويض اليوم";
+                      } else if (status === "غياب") {
+                        statusBg = "bg-rose-500/20 text-rose-300 border-rose-500/40";
+                        statusText = "غياب";
+                      } else if (status === "إذن") {
+                        statusBg = "bg-sky-500/20 text-sky-300 border-sky-500/40";
+                        statusText = "إذن";
+                      }
 
                       return (
                         <tr key={student.barcode} className="hover:bg-indigo-500/10 transition-colors font-medium">
@@ -831,18 +795,14 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
                           <td className="p-3.5 font-bold text-slate-100">{student.name}</td>
                           <td className="p-3.5 text-slate-300">{student.groupGrade}</td>
                           <td className="p-3.5 text-slate-400">
-                            <div className="flex items-center gap-1.5">
-                              <span>{student.groupDays}</span>
-                              {filterDays !== "ALL" && student.groupDays !== filterDays && (
-                                <span className="text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/30 px-2 py-0.5 rounded-full font-bold">
-                                  🔄 تعويض
-                                </span>
-                              )}
-                            </div>
+                            <span>{student.groupDays}</span>
                           </td>
                           <td className="p-3.5">
-                            <span className={`px-3 py-1 rounded-full text-xs font-bold border inline-block ${statusBg}`}>
-                              {status}
+                            <span
+                              className={`px-3 py-1 rounded-full text-xs font-bold border inline-block ${statusBg}`}
+                              title={isCompensatedToday ? "معفي من الغياب - حضر في موعد الحصة البديلة تعويضاً" : undefined}
+                            >
+                              {statusText}
                             </span>
                           </td>
                           <td className="p-3.5 font-mono text-slate-300">{student.parentPhone}</td>

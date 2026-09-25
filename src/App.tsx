@@ -1380,7 +1380,7 @@ export default function App() {
     setStudents(updatedStudents);
 
     // 6. Save batch locally & record tombstone
-    saveAttendanceDeletedKey(todayKey, cleanBarcode);
+    saveAttendanceDeletedKey(cleanBarcode, todayKey);
     saveAttendanceAndStudentsBatch(updatedToday, updatedOrder, updatedTimes, updatedStudents, false);
     saveScanLogData(updatedOrder, updatedTimes);
 
@@ -1631,6 +1631,46 @@ export default function App() {
   const handleChangeAttendanceStatus = useCallback(async (barcode: string, dateKey: string, newStatus: string) => {
     const todayKey = getTodayKey();
     const isToday = dateKey === todayKey;
+    const cleanB = String(barcode).trim();
+
+    if (newStatus === "حذف") {
+      if (isToday) {
+        await handleRemoveFromScanner(cleanB);
+        return;
+      } else {
+        // Historical date attendance deletion
+        const dateMap = { ...(attendanceHistory[dateKey] || {}) };
+        const prevStatus = dateMap[cleanB];
+        delete dateMap[cleanB];
+        const updatedHistory = { ...attendanceHistory, [dateKey]: dateMap };
+        setAttendanceHistory(updatedHistory);
+
+        let updatedStudents = students;
+        if (prevStatus === "حضور" || prevStatus === "تأخير") {
+          updatedStudents = students.map((s) => {
+            if (s.barcode === cleanB) {
+              return {
+                ...s,
+                totalAttendanceDays: Math.max(0, (s.totalAttendanceDays || 0) - 1),
+              };
+            }
+            return s;
+          });
+          setStudents(updatedStudents);
+        }
+
+        saveAttendanceDeletedKey(cleanB, dateKey);
+        saveAttendanceHistoryData(updatedHistory, updatedStudents);
+
+        try {
+          await cloudDeleteAttendance(cleanB, dateKey);
+        } catch (err) {
+          console.warn("[App] Cloud delete attendance warning:", err);
+        }
+        dualSyncAttendanceDelete(cleanB, dateKey);
+        return;
+      }
+    }
     
     const prevStatus = isToday ? attendanceToday[barcode] : (attendanceHistory[dateKey]?.[barcode]);
     if (prevStatus === newStatus) return;

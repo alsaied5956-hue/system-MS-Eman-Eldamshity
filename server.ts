@@ -1169,14 +1169,17 @@ async function startServer() {
       }
 
       const filteredScanOrder = Array.isArray(cachedServerState.scanLogOrder)
-        ? cachedServerState.scanLogOrder.filter((code: string) => code !== b)
+        ? cachedServerState.scanLogOrder.filter((code: string) => String(code).trim() !== b)
         : [];
+      const filteredScanTimes = { ...(cachedServerState.scanLogTimes || {}) };
+      delete filteredScanTimes[b];
 
       cachedServerState = {
         ...cachedServerState,
         attendanceToday: filteredToday,
         attendanceHistory: history,
         scanLogOrder: filteredScanOrder,
+        scanLogTimes: filteredScanTimes,
         deletedAttendanceKeys,
         updatedAt: Date.now(),
       };

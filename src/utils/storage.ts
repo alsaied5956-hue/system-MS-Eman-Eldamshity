@@ -3181,35 +3181,72 @@ export function savePaymentsData(
   syncDataToCloud(updated, true);
 }
 
-export function saveAttendanceDeletedKey(barcode: string, dateKey?: string): void {
+export function saveAttendanceDeletedKey(barcodeOrDate: string, dateOrBarcode?: string): void {
+  let b = String(barcodeOrDate || "").trim();
+  let d = String(dateOrBarcode || "").trim();
+
+  // If first arg looks like a date (e.g. 2026-09-25) and second doesn't, auto-swap them
+  if (/^\d{4}-\d{2}-\d{2}/.test(b) && (!/^\d{4}-\d{2}-\d{2}/.test(d) || d.length < 10)) {
+    const temp = b;
+    b = d;
+    d = temp;
+  }
+
+  const dKey = d || getTodayKey();
+  const cleanBarcode = b;
+  const attKey = `${dKey}_${cleanBarcode}`;
+  const reverseAttKey = `${cleanBarcode}_${dKey}`;
+
   const current = loadLocalData();
-  const dKey = dateKey || getTodayKey();
-  const attKey = `${dKey}_${String(barcode).trim()}`;
   const deletedAttendanceKeys = [...(current.deletedAttendanceKeys || [])];
   if (!deletedAttendanceKeys.includes(attKey)) {
     deletedAttendanceKeys.push(attKey);
   }
+  if (!deletedAttendanceKeys.includes(reverseAttKey)) {
+    deletedAttendanceKeys.push(reverseAttKey);
+  }
 
   const updatedToday = { ...(current.attendanceToday || {}) };
-  delete updatedToday[barcode];
+  delete updatedToday[cleanBarcode];
+  delete updatedToday[b];
 
   const updatedHistory = { ...(current.attendanceHistory || {}) };
   if (updatedHistory[dKey]) {
     updatedHistory[dKey] = { ...updatedHistory[dKey] };
-    delete updatedHistory[dKey][barcode];
+    delete updatedHistory[dKey][cleanBarcode];
+    delete updatedHistory[dKey][b];
   }
 
-  const updatedOrder = (current.scanLogOrder || []).filter((b) => b !== barcode);
+  const updatedOrder = (current.scanLogOrder || []).filter(
+    (item) => String(item).trim() !== cleanBarcode
+  );
+
+  const updatedTimes = { ...(current.scanLogTimes || {}) };
+  delete updatedTimes[cleanBarcode];
+  delete updatedTimes[b];
 
   const updated: SystemData = {
     ...current,
     attendanceToday: updatedToday,
     attendanceHistory: updatedHistory,
     scanLogOrder: updatedOrder,
+    scanLogTimes: updatedTimes,
     deletedAttendanceKeys,
     updatedAt: Date.now(),
   };
   syncDataToCloud(updated, true);
+
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("realtime-record-deleted", {
+        detail: {
+          recordType: "attendance",
+          barcode: cleanBarcode,
+          dateKey: dKey,
+        },
+      })
+    );
+  }
 }
 
 export function saveGroupPricesData(groupPrices: Record<GradeName, number>): void {
