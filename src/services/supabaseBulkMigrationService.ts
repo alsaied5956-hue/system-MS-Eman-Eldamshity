@@ -321,7 +321,6 @@ export async function bulkUploadToSupabase(
     parent_phone: p.parent_phone,
     parent_name: p.parent_name,
     student_barcodes: Array.from(p.student_barcodes),
-    is_active: true,
     updated_at: new Date().toISOString(),
   }));
 
