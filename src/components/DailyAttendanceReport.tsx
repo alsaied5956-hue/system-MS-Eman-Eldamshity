@@ -874,14 +874,16 @@ export const DailyAttendanceReport: React.FC<DailyAttendanceReportProps> = ({
               <span className="text-[10px] text-slate-400 font-tajawal">أيام حضور فعلية</span>
             </div>
 
-            {/* Stat 3: Total Present */}
+            {/* Stat 3: Total Present Check-ins across all sessions */}
             <div className="glass-card p-3.5 rounded-3xl text-center shadow-lg border border-emerald-500/30 bg-emerald-500/5">
               <div className="flex items-center justify-center gap-1.5 text-emerald-400 font-tajawal text-xs font-bold mb-1">
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>إجمالي الحضور</span>
+                <span>إجمالي مرات الحضور</span>
               </div>
               <p className="text-2xl font-black text-emerald-400 font-mono">{cumulativeData.platformTotalPresentScans}</p>
-              <span className="text-[10px] text-emerald-300/80 font-tajawal">حضور فعلي مسجل</span>
+              <span className="text-[10px] text-emerald-300/80 font-tajawal">
+                مجموع الحضور في {cumulativeData.totalSessionDays} جلسات (مرة حضور)
+              </span>
             </div>
 
             {/* Stat 4: Average Attendance Rate */}
