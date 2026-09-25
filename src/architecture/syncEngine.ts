@@ -188,10 +188,12 @@ export async function syncServerClockTime(): Promise<ClockDriftState> {
           fn(clockDriftState);
         } catch {}
       });
+    } else {
+      setTimeout(() => syncServerClockTime().catch(() => {}), 3000);
     }
   } catch (err) {
-    // If offline, preserve current drift knowledge
-    console.warn("[SyncEngine ClockDriftGuard] Could not query server time (offline or endpoint unreachable).");
+    // If during initial dev server warmup, schedule a silent quick retry
+    setTimeout(() => syncServerClockTime().catch(() => {}), 3000);
   }
 
   return clockDriftState;

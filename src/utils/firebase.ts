@@ -76,7 +76,15 @@ export function isFirestoreQuotaError(e: unknown): boolean {
     msg.includes("resource-exhausted") ||
     msg.includes("quota metric") ||
     msg.includes("free daily write units") ||
-    msg.includes("quota exceeded")
+    msg.includes("quota exceeded") ||
+    code === "permission-denied" ||
+    code === "7" ||
+    code.includes("permission-denied") ||
+    msg.includes("permission-denied") ||
+    msg.includes("missing or insufficient permissions") ||
+    msg.includes("timeout") ||
+    msg.includes("مهلة") ||
+    code === "deadline-exceeded"
   );
 }
 
@@ -225,7 +233,14 @@ export const auth: Auth = getAuth(app);
 let authInFlightPromise: Promise<boolean> | null = null;
 let lastAuthAttemptTime = 0;
 let consecutiveAuthFailures = 0;
-let isAnonymousAuthUnavailable = false;
+let isAnonymousAuthUnavailable = (() => {
+  if (typeof window !== "undefined") {
+    try {
+      return localStorage.getItem("firebase_anonymous_auth_disabled") === "true";
+    } catch {}
+  }
+  return false;
+})();
 
 // Listen to auth state transitions to clear failure counters on successful session
 onAuthStateChanged(auth, (user) => {
@@ -265,13 +280,19 @@ export async function ensureFirebaseAuth(): Promise<boolean> {
     } catch (err: any) {
       consecutiveAuthFailures++;
       const code = err?.code || "";
-      // If project has anonymous authentication disabled in console, permanently avoid blocking sync
+      const msg = String(err?.message || "");
       if (
         code === "auth/admin-restricted-operation" ||
         code === "auth/operation-not-allowed" ||
-        consecutiveAuthFailures >= 3
+        code === "auth/configuration-not-found" ||
+        msg.includes("OPERATION_NOT_ALLOWED") ||
+        msg.includes("admin-restricted-operation") ||
+        consecutiveAuthFailures >= 2
       ) {
         isAnonymousAuthUnavailable = true;
+        try {
+          localStorage.setItem("firebase_anonymous_auth_disabled", "true");
+        } catch {}
       }
       return false;
     } finally {

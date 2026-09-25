@@ -42,6 +42,9 @@ const rawSupabaseAnonKey =
 let supabaseUrl = sanitizeSupabaseUrl(rawSupabaseUrl);
 let supabaseAnonKey = (rawSupabaseAnonKey || "").trim().replace(/^["']|["']$/g, "");
 
+// Track whether optional system_configs table exists in remote Supabase schema cache
+export let isSystemConfigsAvailable = false;
+
 if (!supabaseUrl || !supabaseUrl.startsWith("http")) {
   console.error("Critical: Invalid Supabase URL provided:", supabaseUrl);
   supabaseUrl = DEFAULT_SUPABASE_URL;
@@ -1515,18 +1518,26 @@ export async function fetchFullDirectoryFromSupabase(): Promise<SupabaseDirector
       });
     }
 
-    // Fetch system configs
+    // Fetch system configs if available
     let groupPrices: Record<string, number> | undefined;
     let usersList: any[] | undefined;
-    const { data: cfgData } = await supabase.from("system_configs").select("*");
-    if (Array.isArray(cfgData)) {
-      cfgData.forEach((row) => {
-        if (row.id === "group_prices" && row.config_value) {
-          groupPrices = row.config_value;
-        } else if (row.id === "users" && Array.isArray(row.config_value)) {
-          usersList = row.config_value;
+    if (isSystemConfigsAvailable) {
+      try {
+        const { data: cfgData, error: cfgErr } = await supabase.from("system_configs").select("*");
+        if (cfgErr) {
+          isSystemConfigsAvailable = false;
+        } else if (Array.isArray(cfgData)) {
+          cfgData.forEach((row) => {
+            if (row.id === "group_prices" && row.config_value) {
+              groupPrices = row.config_value;
+            } else if (row.id === "users" && Array.isArray(row.config_value)) {
+              usersList = row.config_value;
+            }
+          });
         }
-      });
+      } catch {
+        isSystemConfigsAvailable = false;
+      }
     }
 
     return {

@@ -11,21 +11,16 @@ import { LiveScanPayload, GroupFinishedPayload } from "./supabaseClient";
 import { getPersistentDeviceId } from "./deviceClient";
 
 let rtdbInstance: Database | null = null;
-let isRtdbAvailable = true;
+let isRtdbAvailable = Boolean(FIREBASE_CONFIG.databaseURL);
 
 export function getFirebaseRealtimeDb(): Database | null {
-  if (!isRtdbAvailable) return null;
+  if (!isRtdbAvailable || !FIREBASE_CONFIG.databaseURL) return null;
   if (rtdbInstance) return rtdbInstance;
 
   try {
-    if (FIREBASE_CONFIG.databaseURL) {
-      rtdbInstance = getDatabase(app, FIREBASE_CONFIG.databaseURL);
-    } else {
-      rtdbInstance = getDatabase(app);
-    }
+    rtdbInstance = getDatabase(app, FIREBASE_CONFIG.databaseURL);
     return rtdbInstance;
   } catch (err: any) {
-    console.warn("[Firebase RTDB] Notice initializing Realtime Database:", err?.message || err);
     isRtdbAvailable = false;
     return null;
   }
@@ -284,7 +279,11 @@ export function subscribeToFirebaseLiveScans(callback: (payload: LiveScanPayload
         callback(data);
       },
       (error) => {
-        console.warn("[Firebase RTDB] Scan subscription notice:", error.message);
+        if (error.message.includes("permission_denied") || error.message.includes("permission")) {
+          isRtdbAvailable = false;
+        } else {
+          console.warn("[Firebase RTDB] Scan subscription notice:", error.message);
+        }
       }
     );
 
@@ -326,7 +325,11 @@ export function subscribeToFirebasePayments(callback: (payload: any) => void): (
         callback(data);
       },
       (error) => {
-        console.warn("[Firebase RTDB] Payment subscription notice:", error.message);
+        if (error.message.includes("permission_denied") || error.message.includes("permission")) {
+          isRtdbAvailable = false;
+        } else {
+          console.warn("[Firebase RTDB] Payment subscription notice:", error.message);
+        }
       }
     );
 
@@ -368,7 +371,11 @@ export function subscribeToFirebaseGroups(callback: (payload: GroupFinishedPaylo
         callback(data);
       },
       (error) => {
-        console.warn("[Firebase RTDB] Group subscription notice:", error.message);
+        if (error.message.includes("permission_denied") || error.message.includes("permission")) {
+          isRtdbAvailable = false;
+        } else {
+          console.warn("[Firebase RTDB] Group subscription notice:", error.message);
+        }
       }
     );
 
@@ -410,7 +417,11 @@ export function subscribeToFirebaseAttendanceStatus(callback: (payload: any) => 
         callback(data);
       },
       (error) => {
-        console.warn("[Firebase RTDB] Attendance status subscription notice:", error.message);
+        if (error.message.includes("permission_denied") || error.message.includes("permission")) {
+          isRtdbAvailable = false;
+        } else {
+          console.warn("[Firebase RTDB] Attendance status subscription notice:", error.message);
+        }
       }
     );
 
@@ -449,7 +460,11 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
         callback(data);
       },
       (error) => {
-        console.warn("[Firebase RTDB] Deletion subscription notice:", error.message);
+        if (error.message.includes("permission_denied") || error.message.includes("permission")) {
+          isRtdbAvailable = false;
+        } else {
+          console.warn("[Firebase RTDB] Deletion subscription notice:", error.message);
+        }
       }
     );
     unsubs.push(() => {
@@ -471,7 +486,11 @@ export function subscribeToFirebaseDeletions(callback: (payload: RealtimeDeletio
         callback(data);
       },
       (error) => {
-        console.warn("[Firebase RTDB] Deletion stream notice:", error.message);
+        if (error.message.includes("permission_denied") || error.message.includes("permission")) {
+          isRtdbAvailable = false;
+        } else {
+          console.warn("[Firebase RTDB] Deletion stream notice:", error.message);
+        }
       }
     );
     unsubs.push(() => {

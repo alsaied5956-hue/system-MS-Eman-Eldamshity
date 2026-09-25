@@ -17,6 +17,7 @@ import {
   ensureStudentInSupabase,
   ensureStudentsInSupabaseBulk,
   getTodayDateKey,
+  isSystemConfigsAvailable,
 } from "../utils/supabaseClient";
 import { Student, PaymentRecord, UserAccount, GradeName, GroupDays } from "../types";
 import { getPersistentDeviceId } from "../utils/deviceClient";
@@ -910,6 +911,9 @@ export async function cloudFetchSystemConfigs(): Promise<{
   groupPrices?: Record<GradeName, number>;
   usersList?: UserAccount[];
 }> {
+  if (!isSystemConfigsAvailable) {
+    return {};
+  }
   try {
     const { data, error } = await supabase.from("system_configs").select("*");
     if (error || !Array.isArray(data)) return {};

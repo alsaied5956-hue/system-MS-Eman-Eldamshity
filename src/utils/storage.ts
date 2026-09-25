@@ -269,19 +269,29 @@ export function notifyCloudDataListeners(data: SystemData): void {
 export function isFirestoreQuotaError(e: unknown): boolean {
   if (!e) return false;
   const errorObj = e as { code?: string; message?: string; status?: string };
-  const code = String(errorObj.code || "");
-  const msg = String(errorObj.message || "");
-  const status = String(errorObj.status || "");
+  const code = String(errorObj.code || "").toLowerCase();
+  const msg = String(errorObj.message || "").toLowerCase();
+  const status = String(errorObj.status || "").toLowerCase();
   return (
     code === "resource-exhausted" ||
     code.includes("resource-exhausted") ||
     code === "429" ||
     code.includes("429") ||
-    status === "RESOURCE_EXHAUSTED" ||
-    msg.includes("Quota limit exceeded") ||
+    code === "8" ||
+    status === "resource_exhausted" ||
+    msg.includes("quota limit exceeded") ||
     msg.includes("resource-exhausted") ||
     msg.includes("quota metric") ||
-    msg.includes("Free daily write units")
+    msg.includes("free daily write units") ||
+    msg.includes("quota exceeded") ||
+    code === "permission-denied" ||
+    code === "7" ||
+    code.includes("permission-denied") ||
+    msg.includes("permission-denied") ||
+    msg.includes("missing or insufficient permissions") ||
+    msg.includes("timeout") ||
+    msg.includes("مهلة") ||
+    code === "deadline-exceeded"
   );
 }
 
@@ -1099,7 +1109,7 @@ async function writeSystemPayloadToFirestore(
           _chunkCount: 1,
         }
       ),
-      12000,
+      4000,
       "انتهت مهلة كتابة البيانات في السحابة"
     );
   }
@@ -2393,45 +2403,51 @@ export async function pullLatestCloudDataImmediately(): Promise<boolean> {
         }
       } catch {}
 
-      try {
-        await ensureFirebaseAuth();
-      } catch {}
+      if (!isFirestoreQuotaActive()) {
+        try {
+          await ensureFirebaseAuth();
+        } catch {}
 
-      const systemDocRef = doc(db, "system_state", "main_center_data");
-      const snapshot = await withTimeout(getDoc(systemDocRef), 8000, "Timeout pulling cloud data");
+        const systemDocRef = doc(db, "system_state", "main_center_data");
+        const snapshot = await withTimeout(getDoc(systemDocRef), 3500, "Timeout pulling cloud data");
 
-      if (snapshot && snapshot.exists()) {
-        const val = snapshot.data();
-        if (val) {
-          const cloudObj: Partial<SystemData> = await resolvePayloadFromSnapshot(val);
-          const currentLocal = loadLocalData();
-          const merged = mergeCloudDataWithLocal(currentLocal, cloudObj);
+        if (snapshot && snapshot.exists()) {
+          const val = snapshot.data();
+          if (val) {
+            const cloudObj: Partial<SystemData> = await resolvePayloadFromSnapshot(val);
+            const currentLocal = loadLocalData();
+            const merged = mergeCloudDataWithLocal(currentLocal, cloudObj);
 
-          const incomingHash = JSON.stringify(merged);
-          if (incomingHash !== lastSyncedDataHash) {
-            lastSyncedDataHash = incomingHash;
-            saveToLocalStorage(merged, false);
-            notifySyncStatusChange();
-            notifyCloudDataListeners(merged);
-            if (typeof window !== "undefined") {
-              window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
+            const incomingHash = JSON.stringify(merged);
+            if (incomingHash !== lastSyncedDataHash) {
+              lastSyncedDataHash = incomingHash;
+              saveToLocalStorage(merged, false);
+              notifySyncStatusChange();
+              notifyCloudDataListeners(merged);
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("center-data-updated", { detail: merged }));
+              }
             }
+
+            lastSnapshotReceivedAt = Date.now();
+            lastSuccessfulPullTime = Date.now();
+
+            // If this device had pending unsynced changes created while offline, flush them now
+            const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
+            if (hasPending && !isCurrentlySyncing && (!isQuotaExceeded || Date.now() >= quotaExceededUntil)) {
+              flushPendingSyncToCloud(false).catch(() => {});
+            }
+
+            return true;
           }
-
-          lastSnapshotReceivedAt = Date.now();
-          lastSuccessfulPullTime = Date.now();
-
-          // If this device had pending unsynced changes created while offline, flush them now
-          const hasPending = localStorage.getItem(PENDING_SYNC_KEY) === "true";
-          if (hasPending && !isCurrentlySyncing && (!isQuotaExceeded || Date.now() >= quotaExceededUntil)) {
-            flushPendingSyncToCloud(false).catch(() => {});
-          }
-
-          return true;
         }
       }
-    } catch (err) {
-      console.warn("Notice: Fast cloud pull on wake-up completed with fallback:", err);
+    } catch (err: any) {
+      if (isFirestoreQuotaError(err)) {
+        markFirestoreQuotaExceeded();
+      } else {
+        console.warn("Notice: Fast cloud pull on wake-up completed with fallback:", err?.message || err);
+      }
     } finally {
       pullInFlightPromise = null;
     }
@@ -2712,114 +2728,135 @@ if (typeof window !== "undefined") {
     console.warn("Realtime Supabase subscriber notice:", err);
   }
 
-  try {
-    const sse = new EventSource("/api/sync/events");
-    sse.onmessage = (event) => {
+  if (typeof window !== "undefined" && "EventSource" in window) {
+    let sse: EventSource | null = null;
+    let sseRetryTimer: any = null;
+
+    const connectSse = () => {
       try {
-        const payload = JSON.parse(event.data);
-        if (payload?.type === "live_scan" && payload?.barcode) {
-          // Instant atomic live scan event from another scanning station
-          const current = loadLocalData();
-          const bc = String(payload.barcode).trim();
-          const st = payload.status === "تأخير" ? "تأخير" : payload.status === "غائب" || payload.status === "غياب" ? "غائب" : "حضور";
-          const todayKey = getTodayKey();
-          const scanTime = payload.timeIso || new Date().toISOString();
+        if (sse) {
+          try { sse.close(); } catch {}
+          sse = null;
+        }
+        sse = new EventSource("/api/sync/events");
+        sse.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload?.type === "live_scan" && payload?.barcode) {
+              // Instant atomic live scan event from another scanning station
+              const current = loadLocalData();
+              const bc = String(payload.barcode).trim();
+              const st = payload.status === "تأخير" ? "تأخير" : payload.status === "غائب" || payload.status === "غياب" ? "غائب" : "حضور";
+              const todayKey = getTodayKey();
+              const scanTime = payload.timeIso || new Date().toISOString();
 
-          const updatedAtt = { ...(current.attendanceToday || {}), [bc]: st };
-          const updatedHistory = {
-            ...(current.attendanceHistory || {}),
-            [todayKey]: {
-              ...((current.attendanceHistory || {})[todayKey] || {}),
-              [bc]: st,
-            },
-          };
-          const updatedTimes = { ...(current.scanLogTimes || {}), [bc]: scanTime };
-          const updatedOrder = Array.isArray(current.scanLogOrder)
-            ? [bc, ...current.scanLogOrder.filter((b) => b !== bc)]
-            : [bc];
+              const updatedAtt = { ...(current.attendanceToday || {}), [bc]: st };
+              const updatedHistory = {
+                ...(current.attendanceHistory || {}),
+                [todayKey]: {
+                  ...((current.attendanceHistory || {})[todayKey] || {}),
+                  [bc]: st,
+                },
+              };
+              const updatedTimes = { ...(current.scanLogTimes || {}), [bc]: scanTime };
+              const updatedOrder = Array.isArray(current.scanLogOrder)
+                ? [bc, ...current.scanLogOrder.filter((b) => b !== bc)]
+                : [bc];
 
-          const updatedStudents = (current.students || []).map((s) => {
-            if (String(s.barcode).trim() === bc) {
-              const currentStatus = current.attendanceToday?.[bc];
-              if (!currentStatus || currentStatus === "غائب") {
-                return {
-                  ...s,
-                  totalAttendanceDays: (s.totalAttendanceDays || 0) + 1,
+              const updatedStudents = (current.students || []).map((s) => {
+                if (String(s.barcode).trim() === bc) {
+                  const currentStatus = current.attendanceToday?.[bc];
+                  if (!currentStatus || currentStatus === "غائب") {
+                    return {
+                      ...s,
+                      totalAttendanceDays: (s.totalAttendanceDays || 0) + 1,
+                    };
+                  }
+                }
+                return s;
+              });
+
+              const updated: SystemData = {
+                ...current,
+                students: updatedStudents,
+                attendanceToday: updatedAtt,
+                attendanceTodayDate: todayKey,
+                attendanceHistory: updatedHistory,
+                scanLogTimes: updatedTimes,
+                scanLogOrder: updatedOrder,
+                scanLogUpdatedAt: Date.now(),
+                updatedAt: Date.now(),
+              };
+              saveToLocalStorage(updated, false);
+              notifySyncStatusChange();
+              notifyCloudDataListeners(updated);
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
+              }
+            } else if (payload?.type === "state_update" && payload?.sourceDeviceId !== CLIENT_ID && payload?.data) {
+              applyIncomingRemoteState(payload.data);
+            } else if (payload?.type === "device_entry_notification" && payload?.barcode) {
+              // Device recorded entry at gate - instant lightweight update without downloading entire payload
+              const current = loadLocalData();
+              const bc = String(payload.barcode).trim();
+              if (bc && current.attendanceToday?.[bc] !== "حضور") {
+                const updatedAtt = { ...(current.attendanceToday || {}), [bc]: "حضور" };
+                const updatedTimes = { ...(current.scanLogTimes || {}), [bc]: payload.timeIso || new Date().toISOString() };
+                const updatedOrder = Array.isArray(current.scanLogOrder)
+                  ? [bc, ...current.scanLogOrder.filter((b) => b !== bc)]
+                  : [bc];
+                const updated: SystemData = {
+                  ...current,
+                  attendanceToday: updatedAtt,
+                  scanLogTimes: updatedTimes,
+                  scanLogOrder: updatedOrder,
+                  scanLogUpdatedAt: Date.now(),
                 };
+                saveToLocalStorage(updated, false);
+                notifySyncStatusChange();
+                notifyCloudDataListeners(updated);
+                if (typeof window !== "undefined") {
+                  window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
+                }
+              }
+            } else if (payload?.type === "record_deleted" && payload?.barcode) {
+              const current = loadLocalData();
+              const bc = String(payload.barcode).trim();
+              if (payload.recordType === "student") {
+                const nextStudents = (current.students || []).filter((s) => String(s.barcode).trim() !== bc);
+                saveStudentsData(nextStudents, bc);
+              } else if (payload.recordType === "payment" && payload.monthKey) {
+                const updatedPay = { ...(current.payments || {}) };
+                if (updatedPay[payload.monthKey] && updatedPay[payload.monthKey][bc]) {
+                  const m = { ...updatedPay[payload.monthKey] };
+                  delete m[bc];
+                  updatedPay[payload.monthKey] = m;
+                  savePaymentsData(updatedPay, `${payload.monthKey}_${bc}`);
+                }
+              } else if (payload.recordType === "attendance") {
+                const dKey = payload.dateKey || getTodayKey();
+                saveAttendanceDeletedKey(bc, dKey);
+              }
+              if (typeof window !== "undefined") {
+                window.dispatchEvent(new CustomEvent("realtime-record-deleted", { detail: payload }));
               }
             }
-            return s;
-          });
-
-          const updated: SystemData = {
-            ...current,
-            students: updatedStudents,
-            attendanceToday: updatedAtt,
-            attendanceTodayDate: todayKey,
-            attendanceHistory: updatedHistory,
-            scanLogTimes: updatedTimes,
-            scanLogOrder: updatedOrder,
-            scanLogUpdatedAt: Date.now(),
-            updatedAt: Date.now(),
-          };
-          saveToLocalStorage(updated, false);
-          notifySyncStatusChange();
-          notifyCloudDataListeners(updated);
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
+          } catch {}
+        };
+        sse.onerror = () => {
+          if (sse) {
+            try { sse.close(); } catch {}
+            sse = null;
           }
-        } else if (payload?.type === "state_update" && payload?.sourceDeviceId !== CLIENT_ID && payload?.data) {
-          applyIncomingRemoteState(payload.data);
-        } else if (payload?.type === "device_entry_notification" && payload?.barcode) {
-          // Device recorded entry at gate - instant lightweight update without downloading entire payload
-          const current = loadLocalData();
-          const bc = String(payload.barcode).trim();
-          if (bc && current.attendanceToday?.[bc] !== "حضور") {
-            const updatedAtt = { ...(current.attendanceToday || {}), [bc]: "حضور" };
-            const updatedTimes = { ...(current.scanLogTimes || {}), [bc]: payload.timeIso || new Date().toISOString() };
-            const updatedOrder = Array.isArray(current.scanLogOrder)
-              ? [bc, ...current.scanLogOrder.filter((b) => b !== bc)]
-              : [bc];
-            const updated: SystemData = {
-              ...current,
-              attendanceToday: updatedAtt,
-              scanLogTimes: updatedTimes,
-              scanLogOrder: updatedOrder,
-              scanLogUpdatedAt: Date.now(),
-            };
-            saveToLocalStorage(updated, false);
-            notifySyncStatusChange();
-            notifyCloudDataListeners(updated);
-            if (typeof window !== "undefined") {
-              window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
-            }
-          }
-        } else if (payload?.type === "record_deleted" && payload?.barcode) {
-          const current = loadLocalData();
-          const bc = String(payload.barcode).trim();
-          if (payload.recordType === "student") {
-            const nextStudents = (current.students || []).filter((s) => String(s.barcode).trim() !== bc);
-            saveStudentsData(nextStudents, bc);
-          } else if (payload.recordType === "payment" && payload.monthKey) {
-            const updatedPay = { ...(current.payments || {}) };
-            if (updatedPay[payload.monthKey] && updatedPay[payload.monthKey][bc]) {
-              const m = { ...updatedPay[payload.monthKey] };
-              delete m[bc];
-              updatedPay[payload.monthKey] = m;
-              savePaymentsData(updatedPay, `${payload.monthKey}_${bc}`);
-            }
-          } else if (payload.recordType === "attendance") {
-            const dKey = payload.dateKey || getTodayKey();
-            saveAttendanceDeletedKey(bc, dKey);
-          }
-          if (typeof window !== "undefined") {
-            window.dispatchEvent(new CustomEvent("realtime-record-deleted", { detail: payload }));
-          }
-        }
-      } catch {}
+          clearTimeout(sseRetryTimer);
+          sseRetryTimer = setTimeout(connectSse, 5000);
+        };
+      } catch {
+        clearTimeout(sseRetryTimer);
+        sseRetryTimer = setTimeout(connectSse, 5000);
+      }
     };
-  } catch (err) {
-    console.warn("Realtime SSE subscriber notice:", err);
+    connectSse();
   }
 }
 

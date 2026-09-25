@@ -70,7 +70,7 @@ SUPABASE_CONFIG.isDefaultFallback =
 const defaultProjectId = (firebaseAppletConfig as any)?.projectId || "ai-studio-applet-webapp-dffd3";
 const defaultApiKey = (firebaseAppletConfig as any)?.apiKey || "AIzaSyA8SdOtbVmBF7tsfIC_WsAgOFQj6tkyjaw";
 const defaultAuthDomain = (firebaseAppletConfig as any)?.authDomain || `${defaultProjectId}.firebaseapp.com`;
-const defaultDatabaseUrl = `https://${defaultProjectId}-default-rtdb.firebaseio.com`;
+const defaultDatabaseUrl = (firebaseAppletConfig as any)?.databaseURL || "";
 
 export const FIREBASE_CONFIG = {
   apiKey: resolveEnvValue(
