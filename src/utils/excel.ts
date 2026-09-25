@@ -247,6 +247,56 @@ export function exportAttendanceHistoryToExcel(
   XLSX.writeFile(workbook, `${fileName}.xlsx`);
 }
 
+export function exportAllAttendanceHistoryToExcel(
+  students: Student[],
+  attendanceHistory: Record<string, Record<string, string>>,
+  fileName = `سجل_الحضور_والغياب_الشامل_لجميع_الطلاب`
+): void {
+  const dates = Object.keys(attendanceHistory)
+    .filter((d) => attendanceHistory[d] && Object.keys(attendanceHistory[d]).length > 0)
+    .sort((a, b) => a.localeCompare(b));
+
+  const rows = students.map((s, index) => {
+    let presentCount = 0;
+    let lateCount = 0;
+    let absentCount = 0;
+
+    const dateColumns: Record<string, string> = {};
+    dates.forEach((d) => {
+      const st = attendanceHistory[d]?.[s.barcode] || "لم يسجل";
+      dateColumns[`بتاريخ ${d}`] = st;
+      if (st === "حضور") presentCount++;
+      else if (st === "تأخير") lateCount++;
+      else if (st === "غائب" || st === "غياب") absentCount++;
+    });
+
+    const totalRecordedDays = presentCount + lateCount + absentCount;
+    const rate = totalRecordedDays > 0 ? Math.round(((presentCount + lateCount) / totalRecordedDays) * 100) : 0;
+
+    return {
+      "م": index + 1,
+      "كود الباركود": s.barcode,
+      "اسم الطالب": s.name,
+      "الصف الدراسي": s.groupGrade,
+      "أيام المجموعة": s.groupDays,
+      "رقم ولي الأمر": s.parentPhone,
+      "إجمالي الحضور": presentCount,
+      "إجمالي التأخير": lateCount,
+      "إجمالي الغياب": absentCount,
+      "نسبة الحضور": `${rate}%`,
+      ...dateColumns,
+    };
+  });
+
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  worksheet["!views"] = [{ RTL: true }];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "السجل الشامل");
+
+  XLSX.writeFile(workbook, `${fileName}.xlsx`);
+}
+
 export function parseStudentsFromExcelFile(file: File): Promise<{ students: Partial<Student>[]; errors: string[] }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

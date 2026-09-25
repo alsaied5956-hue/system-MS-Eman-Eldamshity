@@ -363,50 +363,31 @@ function compressCloudPayload(data: any): string {
   }
 }
 
-const ATTENDANCE_SYSTEM_WIPE_EPOCH = 2000000000000;
-
 function sanitizeStatePayload(payload: any): boolean {
   if (!payload || typeof payload !== "object") return false;
   let changed = false;
   const todayKey = new Date().toISOString().slice(0, 10);
 
-  // 1. Enforce complete attendance wipe if before wipe epoch or attendanceWipedAt is set
-  if (!payload.attendanceWipedAt || payload.attendanceWipedAt < ATTENDANCE_SYSTEM_WIPE_EPOCH) {
+  // Guarantee attendance data structures are never nullified
+  if (!payload.attendanceHistory || typeof payload.attendanceHistory !== "object") {
     payload.attendanceHistory = {};
+  }
+  if (!payload.attendanceToday || typeof payload.attendanceToday !== "object") {
     payload.attendanceToday = {};
+  }
+  if (!Array.isArray(payload.scanLogOrder)) {
     payload.scanLogOrder = [];
+  }
+  if (!payload.scanLogTimes || typeof payload.scanLogTimes !== "object") {
     payload.scanLogTimes = {};
-    payload.attendanceWipedAt = ATTENDANCE_SYSTEM_WIPE_EPOCH;
-    changed = true;
   }
 
-  // 2. Sanitize attendanceToday: never retain yesterday's attendance on a new day
-  if (payload.attendanceTodayDate !== todayKey) {
-    if (payload.attendanceToday && Object.keys(payload.attendanceToday).length > 0) {
-      payload.attendanceToday = {};
-      payload.scanLogOrder = [];
-      payload.scanLogTimes = {};
-      changed = true;
-    }
-    payload.attendanceTodayDate = todayKey;
-  }
-
-  // 3. Remove points and enforce 0 points system wide, preserve all student info & exam history
+  // Remove points and enforce 0 points system wide, preserve all student info & exam history
   if (Array.isArray(payload.students)) {
     payload.students.forEach((s: any) => {
       if (s.points !== 0) {
         s.points = 0;
         changed = true;
-      }
-      if (!payload.attendanceHistory || Object.keys(payload.attendanceHistory).length === 0) {
-        if (s.totalAttendanceDays !== 0) {
-          s.totalAttendanceDays = 0;
-          changed = true;
-        }
-        if (s.totalAbsentDays !== 0) {
-          s.totalAbsentDays = 0;
-          changed = true;
-        }
       }
       if (!Array.isArray(s.examHistory)) {
         s.examHistory = [];
@@ -415,6 +396,21 @@ function sanitizeStatePayload(payload: any): boolean {
   }
 
   return changed;
+}
+
+let serverPersistTimer: NodeJS.Timeout | null = null;
+function debouncedPersistServerState() {
+  if (serverPersistTimer) return;
+  serverPersistTimer = setTimeout(() => {
+    serverPersistTimer = null;
+    try {
+      if (cachedServerState) {
+        fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(cachedServerState), "utf-8");
+      }
+    } catch (e) {
+      console.error("[Sync Hub] Failed to persist state to disk:", e);
+    }
+  }, 800);
 }
 
 async function syncServerWithFirestore() {
@@ -921,6 +917,77 @@ async function startServer() {
       broadcastedToClients: sseSubscribers.size,
       firestoreQuotaActive: isServerFirestoreQuotaActive(),
     });
+  });
+
+  // 4a. Ultra-Fast Atomic Live Scan Endpoint (Concurrent-Safe across Multiple Scanning Devices)
+  app.post("/api/sync/live-scan", (req: Request, res: Response) => {
+    const { barcode, status, timeIso, name, grade, days, scannedBy, sourceDeviceId } = req.body;
+    if (!barcode) {
+      return res.status(400).json({ ok: false, error: "Missing barcode" });
+    }
+    const cleanB = String(barcode).trim();
+    const st = status === "تأخير" ? "تأخير" : status === "غائب" || status === "غياب" ? "غائب" : "حضور";
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const isoTime = timeIso || new Date().toISOString();
+
+    if (!cachedServerState || typeof cachedServerState !== "object") {
+      cachedServerState = {
+        students: [],
+        attendanceToday: {},
+        attendanceHistory: {},
+        scanLogOrder: [],
+        scanLogTimes: {},
+      };
+    }
+
+    if (!cachedServerState.attendanceToday) cachedServerState.attendanceToday = {};
+    if (!cachedServerState.attendanceHistory) cachedServerState.attendanceHistory = {};
+    if (!cachedServerState.attendanceHistory[todayKey]) cachedServerState.attendanceHistory[todayKey] = {};
+    if (!Array.isArray(cachedServerState.scanLogOrder)) cachedServerState.scanLogOrder = [];
+    if (!cachedServerState.scanLogTimes) cachedServerState.scanLogTimes = {};
+
+    // Update in-memory state atomically
+    cachedServerState.attendanceToday[cleanB] = st;
+    cachedServerState.attendanceHistory[todayKey][cleanB] = st;
+    cachedServerState.scanLogTimes[cleanB] = isoTime;
+
+    if (!cachedServerState.scanLogOrder.includes(cleanB)) {
+      cachedServerState.scanLogOrder = [cleanB, ...cachedServerState.scanLogOrder];
+    }
+
+    // Increment student attendance count if present in server cache
+    if (Array.isArray(cachedServerState.students)) {
+      const studentObj = cachedServerState.students.find((s: any) => String(s.barcode).trim() === cleanB);
+      if (studentObj) {
+        if (st === "حضور" || st === "تأخير") {
+          studentObj.totalAttendanceDays = (studentObj.totalAttendanceDays || 0) + 1;
+        } else if (st === "غائب") {
+          studentObj.totalAbsentDays = (studentObj.totalAbsentDays || 0) + 1;
+        }
+      }
+    }
+
+    cachedServerState.updatedAt = Date.now();
+    lastServerUpdate = Date.now();
+
+    // Broadcast delta immediately to all connected devices via SSE
+    broadcastToUnified({
+      type: "live_scan",
+      barcode: cleanB,
+      status: st,
+      timeIso: isoTime,
+      name: name || `طالب ${cleanB}`,
+      grade: grade || "",
+      days: days || "",
+      scannedBy: scannedBy || "الماسح",
+      sourceDeviceId: sourceDeviceId || "server",
+      timestamp: Date.now(),
+    });
+
+    // Debounced disk flush to avoid thrashing disk during simultaneous burst scans
+    debouncedPersistServerState();
+
+    res.json({ ok: true, barcode: cleanB, status: st, timestamp: lastServerUpdate });
   });
 
   // 4b. Immediate Server-Side Student Record Deletion with SSE Broadcasting

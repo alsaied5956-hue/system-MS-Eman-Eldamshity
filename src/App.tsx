@@ -36,6 +36,7 @@ import {
   clearAllSystemData,
   loadLocalData,
   syncDataToCloud,
+  saveToLocalStorage,
   purgeTombstoneBarcode,
   autoPushLocalDiskOnStartup,
   pullLatestCloudDataImmediately,
@@ -415,10 +416,40 @@ export default function App() {
               return next;
             });
           }
-          if (cloudData.attendanceToday) setAttendanceToday(cloudData.attendanceToday);
-          if (cloudData.attendanceHistory) setAttendanceHistory(cloudData.attendanceHistory);
-          if (Array.isArray(cloudData.scanLogOrder)) setScanLogOrder(cloudData.scanLogOrder);
-          if (cloudData.scanLogTimes) setScanLogTimes(cloudData.scanLogTimes);
+          if (cloudData.attendanceToday) {
+            setAttendanceToday((prev) => {
+              const merged = { ...cloudData.attendanceToday, ...prev };
+              for (const [b, st] of Object.entries(cloudData.attendanceToday!)) {
+                if (st === "حضور" || st === "تأخير") merged[b] = st;
+              }
+              attendanceTodayRef.current = merged;
+              return merged;
+            });
+          }
+          if (cloudData.attendanceHistory) {
+            setAttendanceHistory((prev) => {
+              const merged = { ...prev };
+              for (const [dKey, dayMap] of Object.entries(cloudData.attendanceHistory!)) {
+                merged[dKey] = { ...(merged[dKey] || {}), ...(dayMap || {}) };
+              }
+              attendanceHistoryRef.current = merged;
+              return merged;
+            });
+          }
+          if (Array.isArray(cloudData.scanLogOrder)) {
+            setScanLogOrder((prev) => {
+              const combined = Array.from(new Set([...cloudData.scanLogOrder!, ...prev]));
+              scanLogOrderRef.current = combined;
+              return combined;
+            });
+          }
+          if (cloudData.scanLogTimes) {
+            setScanLogTimes((prev) => {
+              const combined = { ...(cloudData.scanLogTimes || {}), ...prev };
+              scanLogTimesRef.current = combined;
+              return combined;
+            });
+          }
           if (cloudData.payments) setPayments(cloudData.payments);
           if (cloudData.groupPrices) setGroupPrices(cloudData.groupPrices);
           if (cloudData.usersList) setUsersList(cloudData.usersList);
@@ -478,10 +509,40 @@ export default function App() {
             return next;
           });
         }
-        if (d.attendanceToday) setAttendanceToday(d.attendanceToday);
-        if (d.attendanceHistory) setAttendanceHistory(d.attendanceHistory);
-        if (Array.isArray(d.scanLogOrder)) setScanLogOrder(d.scanLogOrder);
-        if (d.scanLogTimes) setScanLogTimes(d.scanLogTimes);
+        if (d.attendanceToday) {
+          setAttendanceToday((prev) => {
+            const merged = { ...d.attendanceToday, ...prev };
+            for (const [b, st] of Object.entries(d.attendanceToday)) {
+              if (st === "حضور" || st === "تأخير") merged[b] = st as string;
+            }
+            attendanceTodayRef.current = merged;
+            return merged;
+          });
+        }
+        if (d.attendanceHistory) {
+          setAttendanceHistory((prev) => {
+            const merged = { ...prev };
+            for (const [dKey, dayMap] of Object.entries(d.attendanceHistory)) {
+              merged[dKey] = { ...(merged[dKey] || {}), ...(dayMap as any || {}) };
+            }
+            attendanceHistoryRef.current = merged;
+            return merged;
+          });
+        }
+        if (Array.isArray(d.scanLogOrder)) {
+          setScanLogOrder((prev) => {
+            const combined = Array.from(new Set([...d.scanLogOrder, ...prev]));
+            scanLogOrderRef.current = combined;
+            return combined;
+          });
+        }
+        if (d.scanLogTimes) {
+          setScanLogTimes((prev) => {
+            const combined = { ...(d.scanLogTimes || {}), ...prev };
+            scanLogTimesRef.current = combined;
+            return combined;
+          });
+        }
         if (d.payments) setPayments(d.payments);
         if (d.groupPrices) setGroupPrices(d.groupPrices);
         if (d.usersList) setUsersList(d.usersList);
@@ -770,6 +831,22 @@ export default function App() {
         return next;
       });
 
+      // Persist to local storage so subsequent scans from this device already include this scan
+      try {
+        const local = loadLocalData();
+        const updatedLocal = {
+          ...local,
+          attendanceToday: { ...(local.attendanceToday || {}), [b]: status },
+          attendanceHistory: {
+            ...(local.attendanceHistory || {}),
+            [dateKey]: { ...((local.attendanceHistory || {})[dateKey] || {}), [b]: status },
+          },
+          scanLogOrder: (local.scanLogOrder || []).includes(b) ? local.scanLogOrder : [b, ...(local.scanLogOrder || [])],
+          scanLogTimes: { ...(local.scanLogTimes || {}), [b]: timeIso },
+        };
+        saveToLocalStorage(updatedLocal, false);
+      } catch {}
+
       setSyncBanner({
         show: true,
         type: "online-synced",
@@ -1022,6 +1099,22 @@ export default function App() {
         false,
         true
       );
+
+      // ⚡ Atomic High-Speed Broadcast to Server Hub (< 2ms)
+      fetch("/api/sync/live-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          barcode: cleanBarcode,
+          status,
+          timeIso,
+          name: fullStudent?.name || `طالب ${cleanBarcode}`,
+          grade: fullStudent?.groupGrade || "",
+          days: fullStudent?.groupDays || "",
+          scannedBy: currentUser?.username || "الماسح",
+          sourceDeviceId: getPersistentDeviceId(),
+        }),
+      }).catch(() => {});
 
       // ⚡ Asynchronous Cloud Persistence: non-blocking background write
       cloudRecordAttendance(

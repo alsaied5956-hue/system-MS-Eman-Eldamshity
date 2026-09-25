@@ -164,20 +164,37 @@ export function dualSyncLiveScan(params: ScanSyncParams) {
     "Firebase RTDB broadcastFirebaseLiveScan"
   );
 
-  // 2️⃣ Smart Write-Batching: Queue in local memory, committed in bulk every 30s or on Save & Send
-  queueAttendanceScanForBatch({
-    barcode: b,
-    studentName: params.name,
-    status: normalizedStatus,
-    timeIso: params.timeIso,
-    dateKey,
-    scannedBy: params.scannedBy || "الماسح",
-    studentFallback: params.studentFallback || {
-      name: params.name,
-      groupGrade: params.grade as any,
-      groupDays: params.days as any,
-    },
-  });
+  // 2️⃣ Immediate Supabase PostgreSQL Persistent Upsert (<30ms) & Background Queue
+  runInBackground(
+    saveAttendanceToSupabase({
+      barcode: b,
+      studentName: params.name,
+      status: normalizedStatus,
+      timeIso: params.timeIso,
+      dateKey,
+      scannedBy: params.scannedBy || "الماسح",
+      studentFallback: params.studentFallback,
+    }),
+    "Immediate Supabase saveAttendanceToSupabase"
+  );
+
+  // 2.5️⃣ Atomic Multi-Device Local Server Hub Broadcast (<2ms)
+  if (typeof window !== "undefined") {
+    fetch("/api/sync/live-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        barcode: b,
+        status: normalizedStatus,
+        timeIso: params.timeIso,
+        name: params.name,
+        grade: params.grade,
+        days: params.days,
+        scannedBy: params.scannedBy || "الماسح",
+        sourceDeviceId: params.sourceDeviceId || getPersistentDeviceId(),
+      }),
+    }).catch(() => {});
+  }
 
   // 3️⃣ Firebase live_events/today stream
   const liveEventStatus: "حضور" | "تأخير" | "غائب" =

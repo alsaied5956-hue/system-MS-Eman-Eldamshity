@@ -50,7 +50,7 @@ const STORAGE_KEY = "center_data_v2";
 const PENDING_SYNC_KEY = "center_pending_sync_v2";
 const LAST_SYNC_TIME_KEY = "center_last_sync_time";
 const BROADCAST_CHANNEL_NAME = "aiman_system_sync_bus";
-export const ATTENDANCE_SYSTEM_WIPE_EPOCH = 2000000000000;
+export const ATTENDANCE_SYSTEM_WIPE_EPOCH = 0;
 
 export const CLIENT_ID =
   typeof window !== "undefined"
@@ -521,10 +521,6 @@ export function loadLocalData(): SystemData {
     const filteredHistory: Record<string, Record<string, string>> = {};
     for (const [dKey, dayMap] of Object.entries(rawHistory)) {
       if (!dayMap) continue;
-      // Skip bulk mock simulated entries (> 200 entries on a single date)
-      if (Object.keys(dayMap).length > 200) {
-        continue;
-      }
       for (const [bCode, status] of Object.entries(dayMap)) {
         const cleanB = String(bCode).trim();
         const attKey = `${dKey}_${cleanB}`;
@@ -569,22 +565,16 @@ export function loadLocalData(): SystemData {
     const finalUsersList = Array.from(userMap.values());
 
     // -------------------------------------------------------------
-    // System Wipe Guard: Attendance wipe & Points removal enforcement
+    // Preserve full authentic attendance history & reset points to 0
     // -------------------------------------------------------------
-    const isWiped = Boolean(parsed.attendanceWipedAt && parsed.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
+    const effectiveHistory = filteredHistory;
+    const effectiveToday = filteredToday;
+    const effectiveScanOrder = initialScanOrder;
+    const effectiveScanTimes = filteredScanTimes;
 
-    const effectiveHistory = isWiped ? filteredHistory : {};
-    const effectiveToday = isWiped ? filteredToday : {};
-    const effectiveScanOrder = isWiped ? initialScanOrder : [];
-    const effectiveScanTimes = isWiped ? filteredScanTimes : {};
-
-    // Remove points system and ensure 0 points; reset attendance totals if wiped
+    // Remove points system and ensure 0 points; preserve authentic attendance days
     finalStudents.forEach((s) => {
       s.points = 0;
-      if (!isWiped) {
-        s.totalAttendanceDays = 0;
-        s.totalAbsentDays = 0;
-      }
     });
 
     const loaded: SystemData = {
@@ -603,13 +593,11 @@ export function loadLocalData(): SystemData {
       deletedBarcodes: deletedBarcodesList,
       deletedPaymentKeys: deletedPaymentKeysList,
       deletedAttendanceKeys: deletedAttendanceKeysList,
-      attendanceWipedAt: ATTENDANCE_SYSTEM_WIPE_EPOCH,
+      attendanceWipedAt: parseTimestamp(parsed.attendanceWipedAt) || 0,
       scanLogUpdatedAt: parseTimestamp(parsed.scanLogUpdatedAt) || 0,
       updatedAt: parseTimestamp(parsed.updatedAt) || Date.now(),
     };
-    if (!isWiped) {
-      saveToLocalStorage(loaded, false);
-    }
+    saveToLocalStorage(loaded, false);
     memoryCachedData = loaded;
     return loaded;
   } catch (e) {
@@ -1614,35 +1602,27 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
   const mergedStudents = Array.from(studentMap.values());
 
   // 2. Merge Attendance History & Today
-  const isCloudWiped = Boolean(cloud.attendanceWipedAt && cloud.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
-  const isLocalWiped = Boolean(local.attendanceWipedAt && local.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
+  const isCloudWiped = Boolean(ATTENDANCE_SYSTEM_WIPE_EPOCH > 0 && cloud.attendanceWipedAt && cloud.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
+  const isLocalWiped = Boolean(ATTENDANCE_SYSTEM_WIPE_EPOCH > 0 && local.attendanceWipedAt && local.attendanceWipedAt >= ATTENDANCE_SYSTEM_WIPE_EPOCH);
 
-  // Enforce points = 0 on all students and reset attendance counters if wiped
+  // Enforce points = 0 on all students while preserving attendance days
   mergedStudents.forEach((s) => {
     s.points = 0;
-    if (isCloudWiped && Object.keys(cloud.attendanceHistory || {}).length === 0) {
-      s.totalAttendanceDays = 0;
-      s.totalAbsentDays = 0;
-    }
   });
 
   const mergedHistory: Record<string, Record<string, string>> = {};
 
-  // If cloud wiped attendance, do NOT inherit old unwiped local history
-  if (local.attendanceHistory && (!isCloudWiped || isLocalWiped)) {
+  if (local.attendanceHistory) {
     for (const [dateKey, dayMap] of Object.entries(local.attendanceHistory)) {
-      if (dayMap && Object.keys(dayMap).length > 200) {
-        continue;
+      if (dayMap) {
+        mergedHistory[dateKey] = { ...(dayMap || {}) };
       }
-      mergedHistory[dateKey] = { ...(dayMap || {}) };
     }
   }
 
   if (cloud.attendanceHistory) {
     for (const [dateKey, remoteDayMap] of Object.entries(cloud.attendanceHistory)) {
-      if (remoteDayMap && Object.keys(remoteDayMap).length > 200) {
-        continue;
-      }
+      if (!remoteDayMap) continue;
       if (!mergedHistory[dateKey]) {
         mergedHistory[dateKey] = {};
       }
@@ -1902,7 +1882,7 @@ export function mergeCloudDataWithLocal(local: SystemData, cloud: Partial<System
     deletedBarcodes,
     deletedPaymentKeys,
     deletedAttendanceKeys,
-    attendanceWipedAt: Math.max(local.attendanceWipedAt || 0, cloud.attendanceWipedAt || 0, isCloudWiped ? ATTENDANCE_SYSTEM_WIPE_EPOCH : 0),
+    attendanceWipedAt: Math.max(local.attendanceWipedAt || 0, cloud.attendanceWipedAt || 0),
     scanLogUpdatedAt: Math.max(localScanTime, cloudScanTime),
     updatedAt: Math.max(localTime, cloudTime),
   };
@@ -2716,7 +2696,58 @@ if (typeof window !== "undefined") {
     sse.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
-        if (payload?.type === "state_update" && payload?.sourceDeviceId !== CLIENT_ID && payload?.data) {
+        if (payload?.type === "live_scan" && payload?.barcode) {
+          // Instant atomic live scan event from another scanning station
+          const current = loadLocalData();
+          const bc = String(payload.barcode).trim();
+          const st = payload.status === "تأخير" ? "تأخير" : payload.status === "غائب" || payload.status === "غياب" ? "غائب" : "حضور";
+          const todayKey = getTodayKey();
+          const scanTime = payload.timeIso || new Date().toISOString();
+
+          const updatedAtt = { ...(current.attendanceToday || {}), [bc]: st };
+          const updatedHistory = {
+            ...(current.attendanceHistory || {}),
+            [todayKey]: {
+              ...((current.attendanceHistory || {})[todayKey] || {}),
+              [bc]: st,
+            },
+          };
+          const updatedTimes = { ...(current.scanLogTimes || {}), [bc]: scanTime };
+          const updatedOrder = Array.isArray(current.scanLogOrder)
+            ? [bc, ...current.scanLogOrder.filter((b) => b !== bc)]
+            : [bc];
+
+          const updatedStudents = (current.students || []).map((s) => {
+            if (String(s.barcode).trim() === bc) {
+              const currentStatus = current.attendanceToday?.[bc];
+              if (!currentStatus || currentStatus === "غائب") {
+                return {
+                  ...s,
+                  totalAttendanceDays: (s.totalAttendanceDays || 0) + 1,
+                };
+              }
+            }
+            return s;
+          });
+
+          const updated: SystemData = {
+            ...current,
+            students: updatedStudents,
+            attendanceToday: updatedAtt,
+            attendanceTodayDate: todayKey,
+            attendanceHistory: updatedHistory,
+            scanLogTimes: updatedTimes,
+            scanLogOrder: updatedOrder,
+            scanLogUpdatedAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+          saveToLocalStorage(updated, false);
+          notifySyncStatusChange();
+          notifyCloudDataListeners(updated);
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("center-data-updated", { detail: updated }));
+          }
+        } else if (payload?.type === "state_update" && payload?.sourceDeviceId !== CLIENT_ID && payload?.data) {
           applyIncomingRemoteState(payload.data);
         } else if (payload?.type === "device_entry_notification" && payload?.barcode) {
           // Device recorded entry at gate - instant lightweight update without downloading entire payload
