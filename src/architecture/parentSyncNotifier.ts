@@ -165,17 +165,24 @@ export async function emitParentNotification(params: EmitParentEventParams): Pro
     const channel = supabase.channel("parent-realtime-hub", {
       config: { broadcast: { self: false, ack: false } },
     });
-    channel.send({
+    const sendBroadcast = (msg: any) => {
+      if (typeof (channel as any).httpSend === "function") {
+        return (channel as any).httpSend(msg).catch(() => {});
+      }
+      return channel.send(msg).catch(() => {});
+    };
+
+    sendBroadcast({
       type: "broadcast",
       event: `parent_event_${event.studentBarcode}`,
       payload: event,
-    }).catch(() => {});
+    });
 
-    channel.send({
+    sendBroadcast({
       type: "broadcast",
       event: "parent_stream_feed",
       payload: event,
-    }).catch(() => {});
+    });
   } catch (err) {
     console.warn("[ParentSyncNotifier] Supabase realtime broadcast notice:", err);
   }

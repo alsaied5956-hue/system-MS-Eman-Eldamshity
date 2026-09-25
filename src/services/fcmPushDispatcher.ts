@@ -23,6 +23,7 @@ import { Student } from "../types";
 import { emitParentNotification } from "../architecture/parentSyncNotifier";
 import { HLCEngine } from "../architecture/syncEngine";
 import { ParentNotificationType } from "../architecture/dbSchema";
+import { checkIsLocalServerHubAvailable } from "../utils/storage";
 
 export type FcmActionType =
   | "ATTENDANCE_PRESENT"
@@ -137,60 +138,19 @@ export async function lookupParentFcmToken(
     }
   }
 
-  try {
-    // 2. Query parent_accounts table
-    if (cleanPhone && cleanPhone.length >= 8 && cleanPhone !== "00000000000") {
-      const { data: parentRow } = await supabase
-        .from("parent_accounts")
-        .select("fcm_token, parent_phone")
-        .eq("parent_phone", cleanPhone)
-        .maybeSingle();
-
-      if (parentRow && (parentRow as any).fcm_token) {
-        const tok = String((parentRow as any).fcm_token).trim();
-        if (tok) {
-          parentTokenCache.set(`phone_${cleanPhone}`, { token: tok, cachedAt: Date.now() });
-          parentTokenCache.set(`barcode_${cleanBarcode}`, { token: tok, cachedAt: Date.now() });
-          return tok;
-        }
+  // 2. Check local client storage for parent push token (saved during parent portal login / registration)
+  if (typeof window !== "undefined") {
+    try {
+      const localToken =
+        localStorage.getItem(`parent_fcm_token_${cleanBarcode}`) ||
+        (cleanPhone ? localStorage.getItem(`parent_fcm_token_${cleanPhone}`) : null);
+      if (localToken && localToken.trim()) {
+        const tok = localToken.trim();
+        if (cleanPhone) parentTokenCache.set(`phone_${cleanPhone}`, { token: tok, cachedAt: Date.now() });
+        if (cleanBarcode) parentTokenCache.set(`barcode_${cleanBarcode}`, { token: tok, cachedAt: Date.now() });
+        return tok;
       }
-    }
-
-    // 3. Query parent_accounts by student_barcodes array contains
-    if (cleanBarcode) {
-      const { data: parentByBarcode } = await supabase
-        .from("parent_accounts")
-        .select("fcm_token, parent_phone")
-        .contains("student_barcodes", [cleanBarcode])
-        .maybeSingle();
-
-      if (parentByBarcode && (parentByBarcode as any).fcm_token) {
-        const tok = String((parentByBarcode as any).fcm_token).trim();
-        if (tok) {
-          parentTokenCache.set(`barcode_${cleanBarcode}`, { token: tok, cachedAt: Date.now() });
-          return tok;
-        }
-      }
-    }
-
-    // 4. Query students table for student's direct parent account record / fcm_token
-    if (cleanBarcode) {
-      const { data: studentRow } = await supabase
-        .from("students")
-        .select("parent_phone, fcm_token")
-        .eq("barcode", cleanBarcode)
-        .maybeSingle();
-
-      if (studentRow && (studentRow as any).fcm_token) {
-        const tok = String((studentRow as any).fcm_token).trim();
-        if (tok) {
-          parentTokenCache.set(`barcode_${cleanBarcode}`, { token: tok, cachedAt: Date.now() });
-          return tok;
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("[FCM Dispatcher] Notice looking up parent FCM token:", err);
+    } catch {}
   }
 
   return null;
@@ -327,8 +287,8 @@ export async function dispatchFcmPushNotification(
   // 2. Build RFC/FCM HTTP v1 compliant payload
   const fcmPayload = buildFcmHttpV1Payload(resolvedToken, options, timestamp);
 
-  // 3. Dispatch to server-side FCM HTTP v1 endpoint (/api/notifications/fcm-dispatch)
-  if (typeof window !== "undefined") {
+  // 3. Dispatch to server-side FCM HTTP v1 endpoint (/api/notifications/fcm-dispatch) ONLY if local server hub is active
+  if (typeof window !== "undefined" && checkIsLocalServerHubAvailable()) {
     fetch("/api/notifications/fcm-dispatch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -355,7 +315,14 @@ export async function dispatchFcmPushNotification(
       config: { broadcast: { self: false, ack: false } },
     });
 
-    channel.send({
+    const sendBroadcast = (msg: any) => {
+      if (typeof (channel as any).httpSend === "function") {
+        return (channel as any).httpSend(msg).catch(() => {});
+      }
+      return channel.send(msg).catch(() => {});
+    };
+
+    sendBroadcast({
       type: "broadcast",
       event: `parent_event_${cleanBarcode}`,
       payload: {
@@ -369,9 +336,9 @@ export async function dispatchFcmPushNotification(
         data: fcmPayload.message.data,
         timestamp,
       },
-    }).catch(() => {});
+    });
 
-    channel.send({
+    sendBroadcast({
       type: "broadcast",
       event: "parent_stream_feed",
       payload: {
@@ -383,7 +350,7 @@ export async function dispatchFcmPushNotification(
         body: options.body,
         timestamp,
       },
-    }).catch(() => {});
+    });
   } catch (err) {
     console.warn("[FCM Dispatcher] Supabase realtime broadcast note:", err);
   }

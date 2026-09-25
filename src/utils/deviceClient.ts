@@ -115,6 +115,10 @@ export async function recordDeviceEntryExitScan(params: {
   const deviceName = params.deviceName || getPersistentDeviceName();
   const deviceLocation = params.deviceLocation || getPersistentDeviceLocation();
 
+  if (typeof window === "undefined" || !checkIsLocalServerHubAvailable()) {
+    return { ok: true };
+  }
+
   try {
     const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}/scan`, {
       method: "POST",
